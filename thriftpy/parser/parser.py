@@ -17,17 +17,51 @@ from ..thrift import gen_init, TType, TPayload, TException
 
 
 class ModuleLoader(object):
-    def __init__(self):
+    def __init__(self, include_dirs=('.',)):
         self.modules = {}
+        self.samefile = getattr(os.path,'samefile', lambda f1, f2: os.stat(f1) == os.stat(f2))
+        self.include_dirs = include_dirs
 
     def load(self, path):
-        if modname not in self.modules:
-            self.modules[modname] = PARSER(modname, self.load).Document()
-        return self.modules[modname] 
+        return self._load(path)
+
+    def load_data(self, data, module_name):
+        return self._load_data(data, module_name, )
+
+    def _load(self, path, sofar=())
+        if not path.endswith('.thrift'):
+            raise ParseError()  # ...
+        for base in self.include_dirs:
+            abs_path = base + '/' + path
+            if os.path.exists(abs_path):
+                break
+        else:
+            raise ParseError('could not find import {}'.format(path))
+        data = open(path, 'b').read()
+        if modname in self.modules:
+            return self.modules[modname]
+        module = types.ModuleType(modname)
+        document = PARSER(data).Document(modname)
+        for header in document.headers:
+            if header[0] == 'include':
+                if not os.path.exists(path):
+                    raise ParseError('include not valid for non-filesystem path {}'.format(path))
+                included = self._load(header[1], sofar + (path,))
+            if header[0] == 'namespace':
+                pass  # namespace is currently ignored
+        module.__thrift_meta__ = collections.defaultdict(list)
+        for defn in document.definitions:
+            module[defn.__name__] = defn[1]
+            module.__thrift_meta__[defn[0] + 's'].append(defn)
+        self.modules[modname] = module
+        return self.modules[modname]
+
+
+MODULE_LOADER = ModuleLoader()
 
 
 def parse(path, module_name=None, include_dirs=None, include_dir=None,
-          lexer=None, parser=None, enable_cache=True):
+          enable_cache=True):
     """Parse a single thrift file to module object, e.g.::
 
         >>> from thriftpy.parser.parser import parse
@@ -43,39 +77,19 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
                         parameter will be deprecated in the future, it exists
                         for compatiable reason. If it's provided (not `None`),
                         it will be appended to `include_dirs`.
-    :param lexer: ply lexer to use, if not provided, `parse` will new one.
-    :param parser: ply parser to use, if not provided, `parse` will new one.
     :param enable_cache: if this is set to be `True`, parsed module will be
                          cached, this is enabled by default. If `module_name`
                          is provided, use it as cache key, else use the `path`.
     """
-    if os.name == 'nt' and sys.version_info < (3, 2):
-        os.path.samefile = lambda f1, f2: os.stat(f1) == os.stat(f2)
-
-    # dead include checking on current stack
-    for thrift in thrift_stack:
-        if thrift.__thrift_file__ is not None and \
-                os.path.samefile(path, thrift.__thrift_file__):
-            raise ThriftParserError('Dead including on %s' % path)
-
-    global thrift_cache
+    if enable_cache and module_name in MODULE_LOADER.modules:
+        return MODULE_LOADER.modules[module_name]
 
     cache_key = module_name or os.path.normpath(path)
 
-    if enable_cache and cache_key in thrift_cache:
-        return thrift_cache[cache_key]
-
-    if lexer is None:
-        lexer = lex.lex()
-    if parser is None:
-        parser = yacc.yacc(debug=False, write_tables=0)
-
-    global include_dirs_
-
     if include_dirs is not None:
-        include_dirs_ = include_dirs
+        MODULE_LOADER.include_dirs = include_dirs
     if include_dir is not None:
-        include_dirs_.append(include_dir)
+        MODULE_LOADER.include_dirs.append(include_dir)
 
     if not path.endswith('.thrift'):
         raise ThriftParserError('Path should end with .thrift')
@@ -102,19 +116,13 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         basename = os.path.basename(path)
         module_name = os.path.splitext(basename)[0]
 
-    thrift = types.ModuleType(module_name)
-    setattr(thrift, '__thrift_file__', path)
-    thrift_stack.append(thrift)
-    lexer.lineno = 1
-    parser.parse(data)
-    thrift_stack.pop()
-
-    if enable_cache:
-        thrift_cache[cache_key] = thrift
-    return thrift
+    module = MODULE_LOADER.load(path)
+    if not enable_cache:
+        del MODULE_LOADER.modules[module_name]
+    return module
 
 
-def parse_fp(source, module_name, lexer=None, parser=None, enable_cache=True):
+def parse_fp(source, module_name, enable_cache=True):
     """Parse a file-like object to thrift module object, e.g.::
 
         >>> from thriftpy.parser.parser import parse_fp
@@ -125,8 +133,6 @@ def parse_fp(source, module_name, lexer=None, parser=None, enable_cache=True):
     :param source: file-like object, expected to have a method named `read`.
     :param module_name: the name for parsed module, shoule be endswith
                         '_thrift'.
-    :param lexer: ply lexer to use, if not provided, `parse` will new one.
-    :param parser: ply parser to use, if not provided, `parse` will new one.
     :param enable_cache: if this is set to be `True`, parsed module will be
                          cached by `module_name`, this is enabled by default.
     """
@@ -134,46 +140,18 @@ def parse_fp(source, module_name, lexer=None, parser=None, enable_cache=True):
         raise ThriftParserError('ThriftPy can only generate module with '
                                 '\'_thrift\' suffix')
 
-    if enable_cache and module_name in thrift_cache:
-        return thrift_cache[module_name]
+    if enable_cache and module_name in MODULE_LOADER.thrift_cache:
+        return MODULE_LOADER.thrift_cache[module_name]
 
     if not hasattr(source, 'read'):
         raise ThriftParserError('Except `source` to be a file-like object with'
                                 'a method named \'read\'')
 
-    if lexer is None:
-        lexer = lex.lex()
-    if parser is None:
-        parser = yacc.yacc(debug=False, write_tables=0)
-
-    data = source.read()
-
-    thrift = types.ModuleType(module_name)
-    setattr(thrift, '__thrift_file__', None)
-    thrift_stack.append(thrift)
-    lexer.lineno = 1
-    parser.parse(data)
-    thrift_stack.pop()
-
-    if enable_cache:
-        thrift_cache[module_name] = thrift
-    return thrift
+    return MODULE_LOADER.load_data(source.read(), module_name, cache=enable_cache)
 
 
-def _add_thrift_meta(key, val):
-    thrift = thrift_stack[-1]
-
-    if not hasattr(thrift, '__thrift_meta__'):
-        meta = collections.defaultdict(list)
-        setattr(thrift, '__thrift_meta__',  meta)
-    else:
-        meta = getattr(thrift, '__thrift_meta__')
-
-    meta[key].append(val)
-
-
-def _make_enum(name, kvs):
-    attrs = {'__module__': thrift_stack[-1].__name__, '_ttype': TType.I32}
+def _make_enum(name, kvs, modname):
+    attrs = {'__module__': modname, '_ttype': TType.I32}
     cls = type(name, (object, ), attrs)
 
     _values_to_names = {}
@@ -196,8 +174,8 @@ def _make_enum(name, kvs):
     return cls
 
 
-def _make_empty_struct(name, ttype=TType.STRUCT, base_cls=TPayload):
-    attrs = {'__module__': thrift_stack[-1].__name__, '_ttype': ttype}
+def _make_empty_struct(name, modname, ttype=TType.STRUCT, base_cls=TPayload):
+    attrs = {'__module__': modname, '_ttype': ttype}
     return type(name, (base_cls, ), attrs)
 
 
@@ -278,7 +256,7 @@ def _get_ttype(inst, default_ttype=None):
 
 
 GRAMMAR = '''
-Document :modname = (brk Header)*:hs (brk Definition(modname))*:ds brk -> Document(hs, ds)
+Document :modname = (brk Header)*:hs (brk Definition(modname))*:ds brk -> Document(hs, ds, modname)
 Header = <Include | Namespace>
 Include = brk 'include' brk Literal:path -> 'include', path
 Namespace = brk 'namespace' brk <((NamespaceScope ('.' Identifier)?)| unsupported_namespacescope)>:scope brk Identifier:name brk uri? -> 'namespace', scope, name
@@ -288,13 +266,13 @@ unsupported_namespacescope = Identifier
 Definition :modname = brk (Const | Typedef | Enum(modname) | Struct(modname) | Union(modname) | Exception(modname) | Service(modname))
 Const = 'const' brk FieldType:type brk Identifier:name brk '=' brk ConstValue:val brk ListSeparator? -> 'const', type, name, val
 Typedef = 'typedef' brk DefinitionType:type brk Identifier:alias -> 'typedef', type, alias
-Enum :modname = 'enum' brk Identifier:name brk '{' enum_item*:vals '}' -> Enum(name, vals, modname) 
+Enum :modname = 'enum' brk Identifier:name brk '{' enum_item*:vals '}' -> 'enum', Enum(name, vals, modname) 
 enum_item = brk Identifier:name brk ('=' brk IntConstant)?:value brk ListSeparator? brk -> name, value
-Struct :modname = 'struct' brk name_fields:nf brk immutable? -> Struct(nf[0], nf[1], modname)
-Union :modname = 'union' brk name_fields:nf -> Union(nf[0], nf[1], modname)
-Exception :modname = 'exception' brk name_fields:nf -> Exception_(nf[0], nf[1], modname)
+Struct :modname = 'struct' brk name_fields:nf brk immutable? -> 'struct', Struct(nf[0], nf[1], modname)
+Union :modname = 'union' brk name_fields:nf -> 'union', Union(nf[0], nf[1], modname)
+Exception :modname = 'exception' brk name_fields:nf -> 'exception', Exception_(nf[0], nf[1], modname)
 name_fields = Identifier:name brk '{' (brk Field)*:fields brk '}' -> name, fields
-Service :modname = 'service' brk Identifier:name brk ('extends' Identifier)?:extends '{' (brk Function)*:funcs brk '}' -> Service(name, funcs, extends, modname)
+Service :modname = 'service' brk Identifier:name brk ('extends' Identifier)?:extends '{' (brk Function)*:funcs brk '}' -> 'service', Service(name, funcs, extends, modname)
 Field = brk FieldID:id brk FieldReq?:req brk FieldType:ttype brk Identifier:name brk ('=' brk ConstValue)?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = IntConstant:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
