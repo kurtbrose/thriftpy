@@ -53,7 +53,8 @@ class ModuleLoader(object):
         if module_name in self.modules:
             return self.modules[module_name]
         module = types.ModuleType(module_name)
-        document = PARSER(data).Document(module_name)
+        module.__thrift_meta__ = collections.defaultdict(list)
+        document = PARSER(data).Document(module)
         for header in document.headers:
             if header[0] == 'include':
                 if not load_includes:
@@ -61,45 +62,6 @@ class ModuleLoader(object):
                 included = self._load(header[1], sofar + (path,))
             if header[0] == 'namespace':
                 pass  # namespace is currently ignored
-        module.__thrift_meta__ = collections.defaultdict(list)
-        def lookup_symbol(dot_name):  # TODO: lookup non-local symbols
-            val = module
-            for rel_name in dot_name.split('.'):
-                val = getattr(val, rel_name)
-            return val
-        for defn in document.definitions:
-            # intercept const referencing identifiers and resolve
-            if defn.type == 'const' and type(defn.val) is ThriftIdentifier:
-                val = lookup_symbol(defn.val)
-            else:
-                val = defn.val
-            setattr(module, defn.name, val)
-            module.__thrift_meta__[defn.type + 's'].append(val)
-            # resolve identifier references in other types
-            if defn.type == 'service':
-                service = defn.val
-                if service.thrift_extends:
-                    service.__base__ = lookup_symbol(service.thrift_extends)
-                # check each of the arg and result structs in the service for identifier refs
-                for key, struct in service.__dict__.items():
-                    if not isinstance(struct, TPayload):
-                        continue
-                    for i in range(len(struct.default_spec)):
-                        name, default = struct.default_spec[i]
-                        if type(default) is ThriftIdentifier:
-                            struct.default_spec[i] = name, lookup_symbol(default)
-                    if key.endswith('_result'):
-                        gen_init(struct, struct.thrift_spec, struct.default_spec)
-                if service.thrift_extends:
-                    service.thrift_services.extend()  # TODO: resolution order or something here
-            elif defn.type in ('struct', 'union', 'exception'):
-                # resolve field defaults if they are identifiers
-                struct = defn.val
-                for i in range(len(struct.default_spec)):
-                    name, default = struct.default_spec[i]
-                    if type(default) is ThriftIdentifier:
-                        struct.default_spec[i] = name, lookup_symbol(default)
-                gen_init(struct, struct.thrift_spec, struct.default_spec)
         self.modules[module_name] = module
         return self.modules[module_name]
 
@@ -198,8 +160,8 @@ def parse_fp(source, module_name, enable_cache=True):
     return MODULE_LOADER.load_data(source.read(), module_name, cache=enable_cache)
 
 
-def _make_enum(name, kvs, modname):
-    attrs = {'__module__': modname, '_ttype': TType.I32}
+def _make_enum(name, kvs, module):
+    attrs = {'__module__': module.__name__, '_ttype': TType.I32}
     cls = type(name, (object, ), attrs)
 
     _values_to_names = {}
@@ -223,8 +185,8 @@ def _make_enum(name, kvs, modname):
     return cls
 
 
-def _make_empty_struct(name, modname, ttype=TType.STRUCT, base_cls=TPayload):
-    attrs = {'__module__': modname, '_ttype': ttype}
+def _make_empty_struct(name, module, ttype=TType.STRUCT, base_cls=TPayload):
+    attrs = {'__module__': module.__name__, '_ttype': ttype}
     return type(name, (base_cls, ), attrs)
 
 
@@ -247,13 +209,13 @@ def _fill_in_struct(cls, fields):
     return cls
 
 
-def _make_struct(name, fields, modname, ttype=TType.STRUCT, base_cls=TPayload):
-    cls = _make_empty_struct(name, modname, ttype=ttype, base_cls=base_cls)
+def _make_struct(name, fields, module, ttype=TType.STRUCT, base_cls=TPayload):
+    cls = _make_empty_struct(name, module, ttype=ttype, base_cls=base_cls)
     return _fill_in_struct(cls, fields or ())
 
 
-def _make_service(name, funcs, extends, modname):
-    attrs = {'__module__': modname}
+def _make_service(name, funcs, extends, module):
+    attrs = {'__module__': module.__name__}
     cls = type(name, (object, ), attrs)
     thrift_services = []
 
@@ -261,11 +223,11 @@ def _make_service(name, funcs, extends, modname):
         # args payload cls
         args_name = '%s_args' % func.name
         args_fields = func.fields
-        args_cls = _make_struct(args_name, args_fields, modname)
+        args_cls = _make_struct(args_name, args_fields, module)
         setattr(cls, args_name, args_cls)
         # result payload cls
         result_name = '%s_result' % func.name
-        result_cls = _make_struct(result_name, func.throws, modname)
+        result_cls = _make_struct(result_name, func.throws, module)
         setattr(result_cls, 'oneway', func.oneway)
         if func.ttype != TType.VOID:
             result_cls.thrift_spec[0] = _ttype_spec(func.ttype, 'success')
@@ -290,17 +252,34 @@ def _get_ttype(inst, default_ttype=None):
     return default_ttype
 
 
-def _make_union(name, fields, modname):
-    cls = _make_empty_struct(name, modname)
+def _make_union(name, fields, module):
+    cls = _make_empty_struct(name, module)
     return _fill_in_struct(cls, fields)
 
 
-def _make_exception(name, fields, modname):
-    return _make_struct(name, fields, modname, base_cls=TException)
+def _make_exception(name, fields, module):
+    return _make_struct(name, fields, module, base_cls=TException)
+
+
+def _add_definition(module, type, name, val, ttype):
+    module.__thrift_meta__[type + 's'].append(val)
+    setattr(module, name, val)
+    return type, name, val, ttype
+
+
+def _add_include(path):
+    pass
+
+
+def _lookup_symbol(module, identifier):
+    val = module
+    for rel_name in identifier.split('.'):
+        val = getattr(val, rel_name)
+    return val
 
 
 GRAMMAR = '''
-Document :modname = (brk Header)*:hs (brk Definition(modname))*:ds brk -> Document(hs, ds)
+Document :module = (brk Header)*:hs (brk Definition(module))*:ds brk -> Document(hs, ds)
 Header = <Include | Namespace>
 Include = brk 'include' brk Literal:path -> 'include', path
 Namespace =\
@@ -310,32 +289,32 @@ uri = '(' ws 'uri' ws '=' ws Literal:uri ws ')' -> uri
 NamespaceScope = ('*' | 'cpp' | 'java' | 'py.twisted' | 'py' | 'perl' | 'rb' | 'cocoa' | 'csharp' |
                   'xsd' | 'c_glib' | 'js' | 'st' | 'go' | 'php' | 'delphi' | 'lua')
 unsupported_namespacescope = Identifier
-Definition :modname = brk (Const | Typedef | Enum(modname) | Struct(modname) | Union(modname) |
-                           Exception(modname) | Service(modname)):defn -> Definition(*defn)
-Const = 'const' brk FieldType:type brk Identifier:name brk '='\
-    brk ConstValue:val brk ListSeparator? -> 'const', name, val, type
+Definition :module = brk (Const(module) | Typedef | Enum(module) | Struct(module) | Union(module) |
+                           Exception(module) | Service(module)):defn -> Definition(module, *defn)
+Const :module = 'const' brk FieldType:type brk Identifier:name brk '='\
+    brk ConstValue(module):val brk ListSeparator? -> 'const', name, val, type
 Typedef = 'typedef' brk DefinitionType:type brk Identifier:alias -> 'typedef', alias, type, None
-Enum :modname = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
-                -> 'enum', name, Enum(name, vals, modname), None 
+Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
+                -> 'enum', name, Enum(name, vals, module), None 
 enum_item = brk Identifier:name brk ('=' brk IntConstant)?:value brk ListSeparator? brk -> name, value
-Struct :modname = 'struct' brk name_fields:nf brk immutable?\
-                  -> 'struct', nf[0], Struct(nf[0], nf[1], modname), None
-Union :modname = 'union' brk name_fields:nf -> 'union', nf[0], Union(nf[0], nf[1], modname), None
-Exception :modname = 'exception' brk name_fields:nf\
-                     -> 'exception', nf[0], Exception_(nf[0], nf[1], modname), None
-name_fields = Identifier:name brk '{' (brk Field)*:fields brk '}' -> name, fields
-Service :modname =\
-    'service' brk Identifier:name brk ('extends' identifier_ref)?:extends '{' (brk Function)*:funcs brk '}'\
-    -> 'service', name, Service(name, funcs, extends, modname), None
-Field = brk FieldID:id brk FieldReq?:req brk FieldType:ttype brk Identifier:name brk\
-    ('=' brk ConstValue)?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
+Struct :module = 'struct' brk name_fields(module):nf brk immutable?\
+                  -> 'struct', nf[0], Struct(nf[0], nf[1], module), None
+Union :module = 'union' brk name_fields(module):nf -> 'union', nf[0], Union(nf[0], nf[1], module), None
+Exception :module = 'exception' brk name_fields(module):nf\
+                     -> 'exception', nf[0], Exception_(nf[0], nf[1], module), None
+name_fields :module = Identifier:name brk '{' (brk Field(module))*:fields brk '}' -> name, fields
+Service :module =\
+    'service' brk Identifier:name brk ('extends' identifier_ref(module))?:extends '{' (brk Function(module))*:funcs brk '}'\
+    -> 'service', name, Service(name, funcs, extends, module), None
+Field :module = brk FieldID:id brk FieldReq?:req brk FieldType:ttype brk Identifier:name brk\
+    ('=' brk ConstValue(module))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = IntConstant:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
-Function = 'oneway'?:oneway brk FunctionType:ft brk Identifier:name '(' (brk Field*):fs ')'\
-     brk Throws?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
+Function :module = 'oneway'?:oneway brk FunctionType:ft brk Identifier:name '(' (brk Field(module)*):fs ')'\
+     brk Throws(module)?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
 FunctionType = ('void' !(TType.VOID)) | FieldType
-Throws = 'throws' brk '(' (brk Field)*:fs ')' -> fs
+Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
 # Types
 FieldType = ContainerType | BaseType | StructType
 DefinitionType = BaseType | ContainerType
@@ -348,16 +327,16 @@ ListType = 'list' brk '<' brk FieldType:valt brk '>' brk CppType? -> TType.LIST,
 StructType = Identifier:name -> TType.STRUCT, name
 CppType = 'cpp_type' Literal -> None
 # Constant Values
-ConstValue = DoubleConstant | IntConstant | ConstList | ConstMap | Literal | identifier_ref
+ConstValue :module = DoubleConstant | IntConstant | ConstList(module) | ConstMap(module) | Literal | identifier_ref(module)
 IntConstant = <('+' | '-')? Digit+>:val -> int(val)
 DoubleConstant = <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') IntConstant)?>:val !(float(val)):fval\
                  -> fval if fval and fval % 1 else int(fval)  # favor integer representation if it is exact
-ConstList = '[' (brk ConstValue:val ListSeparator? -> val)*:vals ']' -> vals
-ConstMap = '{' (brk ConstValue:key ':' ConstValue:val ListSeparator? -> key, val)*:items '}' -> dict(items)
+ConstList :module = '[' (brk ConstValue(module):val ListSeparator? -> val)*:vals ']' -> vals
+ConstMap :module = '{' (brk ConstValue(module):key ':' ConstValue(module):val ListSeparator? -> key, val)*:items '}' -> dict(items)
 # Basic Definitions
 Literal = (('"' <(~'"' anything)*>:val '"') | ("'" <(~"'" anything)*>:val "'")) -> val
 Identifier = not_reserved <(Letter | '_') (Letter | Digit | '.' | '_')*>
-identifier_ref = Identifier:val -> IdentifierRef(val)  # unresolved reference
+identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
 ListSeparator = ',' | ';'
 Letter = letter  # parsley built-in
 Digit = digit  # parsley built-in
@@ -400,15 +379,12 @@ BASE_TYPE_MAP = {
 }
 
 
-class ThriftIdentifier(str):
-    'marker class to separate thrift identifiers from actual string values'
-
-
 PARSER = parsley.makeGrammar(
     GRAMMAR, 
     {
         'Document': collections.namedtuple('Document', 'headers definitions'),
-        'Definition': collections.namedtuple('Definition', 'type name val ttype'),
+        #'Include': _add_include,
+        'Definition': _add_definition,
         'Enum': _make_enum,
         'Struct': _make_struct,
         'Union': _make_union,
@@ -416,7 +392,7 @@ PARSER = parsley.makeGrammar(
         'Service': _make_service,
         'Function': collections.namedtuple('Function', 'name ttype fields oneway throws'),
         'Field': collections.namedtuple('Field', 'id req ttype name default'),
-        'IdentifierRef': ThriftIdentifier,
+        'IdentifierRef': _lookup_symbol,
         'BaseTType': BASE_TYPE_MAP.get,
         'TType': TType
     }
