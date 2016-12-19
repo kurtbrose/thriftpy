@@ -26,13 +26,13 @@ class ModuleLoader(object):
         self.samefile = getattr(os.path,'samefile', lambda f1, f2: os.stat(f1) == os.stat(f2))
         self.include_dirs = include_dirs
 
-    def load(self, path):
-        return self._load(path, True)
+    def load(self, path, module_name):
+        return self._load(path, True, module_name=module_name)
 
     def load_data(self, data, module_name):
         return self._load_data(data, module_name, False)
 
-    def _load(self, path, load_includes, sofar=()):
+    def _load(self, path, load_includes, sofar=(), module_name=None):
         if not path.endswith('.thrift'):
             raise ParseError()  # ...
         if os.path.isabs(path):
@@ -44,24 +44,30 @@ class ModuleLoader(object):
                     break
             else:
                 raise ParseError('could not find import {}'.format(path))
+        if abs_path in sofar:
+            cycle = sofar[sofar.index(abs_path):] + (abs_path,)
+            path_to_cycle = sofar[:sofar.index(abs_path)]
+            raise ImportError('circular import:\n{}\nvia:\n{}'.format(
+                '->\n'.join(cycle), '->\n'.join(path_to_cycle)))
         with open(abs_path, 'rb') as f:
             data = f.read()
-        module_name = os.path.basename(abs_path).replace('.thrift', '_thrift')
-        return self._load_data(data, module_name)
+        if module_name is None:
+            module_name = os.path.splitext(os.path.basename(abs_path))[0]  # remove '.thrift' from end
+        return self._load_data(data, module_name, load_includes, sofar + (abs_path,))
 
-    def _load_data(self, data, module_name):
+    def _cant_load(self, path, *a, **kw):
+        raise ParseError('cannot include sub-modules')
+
+    def _load_data(self, data, module_name, load_includes, sofar=()):
         if module_name in self.modules:
             return self.modules[module_name]
         module = types.ModuleType(module_name)
         module.__thrift_meta__ = collections.defaultdict(list)
-        document = PARSER(data).Document(module)
-        for header in document.headers:
-            if header[0] == 'include':
-                if not load_includes:
-                    raise ParseError('cannot include sub-module')
-                included = self._load(header[1], sofar + (path,))
-            if header[0] == 'namespace':
-                pass  # namespace is currently ignored
+        if not load_includes:
+            document = PARSER(data).Document(module, self._cant_load)
+        else:
+            document = PARSER(data).Document(
+                module, lambda path: self._load(path, load_includes, sofar))
         self.modules[module_name] = module
         return self.modules[module_name]
 
@@ -126,7 +132,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         basename = os.path.basename(path)
         module_name = os.path.splitext(basename)[0]
 
-    module = MODULE_LOADER.load(path)
+    module = MODULE_LOADER.load(path, module_name)
     if not enable_cache:
         del MODULE_LOADER.modules[module_name]
     return module
@@ -190,7 +196,7 @@ def _make_empty_struct(name, module, ttype=TType.STRUCT, base_cls=TPayload):
     return type(name, (base_cls, ), attrs)
 
 
-def _fill_in_struct(cls, fields):
+def _fill_in_struct(cls, fields, _gen_init=True):
     thrift_spec = {}
     default_spec = []
     _tspec = {}
@@ -206,17 +212,23 @@ def _fill_in_struct(cls, fields):
     setattr(cls, 'thrift_spec', thrift_spec)
     setattr(cls, 'default_spec', default_spec)
     setattr(cls, '_tspec', _tspec)
+    if _gen_init:
+        gen_init(cls, thrift_spec, default_spec)
     return cls
 
 
-def _make_struct(name, fields, module, ttype=TType.STRUCT, base_cls=TPayload):
+def _make_struct(name, fields, module, ttype=TType.STRUCT, base_cls=TPayload,
+                 _gen_init=True):
     cls = _make_empty_struct(name, module, ttype=ttype, base_cls=base_cls)
-    return _fill_in_struct(cls, fields or ())
+    return _fill_in_struct(cls, fields or (), _gen_init=_gen_init)
 
 
 def _make_service(name, funcs, extends, module):
+    if extends is None:
+        extends = object
+
     attrs = {'__module__': module.__name__}
-    cls = type(name, (object, ), attrs)
+    cls = type(name, (extends, ), attrs)
     thrift_services = []
 
     for func in funcs:
@@ -227,19 +239,24 @@ def _make_service(name, funcs, extends, module):
         setattr(cls, args_name, args_cls)
         # result payload cls
         result_name = '%s_result' % func.name
-        result_cls = _make_struct(result_name, func.throws, module)
+        result_cls = _make_struct(result_name, func.throws, module,
+                                  _gen_init=False)
         setattr(result_cls, 'oneway', func.oneway)
         if func.ttype != TType.VOID:
             result_cls.thrift_spec[0] = _ttype_spec(func.ttype, 'success')
             result_cls.default_spec.insert(0, ('success', None))
         setattr(cls, result_name, result_cls)
         thrift_services.append(func.name)
+    if extends is not None and hasattr(extends, 'thrift_services'):
+        thrift_services.extend(extends.thrift_services)
     cls.thrift_services = thrift_services
     cls.thrift_extends = extends
     return cls
 
 
 def _ttype_spec(ttype, name, required=False):
+    if required is not False:
+        required = (required == 'required')  # 'default' counts as 'optional'
     if isinstance(ttype, int):
         return ttype, name, required
     else:
@@ -263,12 +280,15 @@ def _make_exception(name, fields, module):
 
 def _add_definition(module, type, name, val, ttype):
     module.__thrift_meta__[type + 's'].append(val)
-    setattr(module, name, val)
+    module.__dict__[name] = val
     return type, name, val, ttype
 
 
-def _add_include(path):
-    pass
+def _add_include(module, path, loadf):
+    included = loadf(path)
+    module.__dict__[included.__name__] = included
+    module.__thrift_meta__['includes'].append(included)
+    return 'include', included
 
 
 def _lookup_symbol(module, identifier):
@@ -279,9 +299,9 @@ def _lookup_symbol(module, identifier):
 
 
 GRAMMAR = '''
-Document :module = (brk Header)*:hs (brk Definition(module))*:ds brk -> Document(hs, ds)
-Header = <Include | Namespace>
-Include = brk 'include' brk Literal:path -> 'include', path
+Document :module :load_module = (brk Header(module load_module))*:hs (brk Definition(module))*:ds brk -> Document(hs, ds)
+Header :module :load_module = <Include(module load_module) | Namespace>
+Include :module :load_module = brk 'include' brk Literal:path -> Include(module, path, load_module)
 Namespace =\
     brk 'namespace' brk <((NamespaceScope ('.' Identifier)?)| unsupported_namespacescope)>:scope brk\
         Identifier:name brk uri? -> 'namespace', scope, name
@@ -289,11 +309,11 @@ uri = '(' ws 'uri' ws '=' ws Literal:uri ws ')' -> uri
 NamespaceScope = ('*' | 'cpp' | 'java' | 'py.twisted' | 'py' | 'perl' | 'rb' | 'cocoa' | 'csharp' |
                   'xsd' | 'c_glib' | 'js' | 'st' | 'go' | 'php' | 'delphi' | 'lua')
 unsupported_namespacescope = Identifier
-Definition :module = brk (Const(module) | Typedef | Enum(module) | Struct(module) | Union(module) |
+Definition :module = brk (Const(module) | Typedef(module) | Enum(module) | Struct(module) | Union(module) |
                            Exception(module) | Service(module)):defn -> Definition(module, *defn)
-Const :module = 'const' brk FieldType:type brk Identifier:name brk '='\
+Const :module = 'const' brk FieldType(module):type brk Identifier:name brk '='\
     brk ConstValue(module):val brk ListSeparator? -> 'const', name, val, type
-Typedef = 'typedef' brk DefinitionType:type brk Identifier:alias -> 'typedef', alias, type, None
+Typedef :module = 'typedef' brk DefinitionType(module):type brk Identifier:alias -> 'typedef', alias, type, None
 Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
                 -> 'enum', name, Enum(name, vals, module), None 
 enum_item = brk Identifier:name brk ('=' brk IntConstant)?:value brk ListSeparator? brk -> name, value
@@ -306,25 +326,25 @@ name_fields :module = Identifier:name brk '{' (brk Field(module))*:fields brk '}
 Service :module =\
     'service' brk Identifier:name brk ('extends' identifier_ref(module))?:extends '{' (brk Function(module))*:funcs brk '}'\
     -> 'service', name, Service(name, funcs, extends, module), None
-Field :module = brk FieldID:id brk FieldReq?:req brk FieldType:ttype brk Identifier:name brk\
+Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
     ('=' brk ConstValue(module))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = IntConstant:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
-Function :module = 'oneway'?:oneway brk FunctionType:ft brk Identifier:name '(' (brk Field(module)*):fs ')'\
+Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name '(' (brk Field(module)*):fs ')'\
      brk Throws(module)?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
-FunctionType = ('void' !(TType.VOID)) | FieldType
+FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
 # Types
-FieldType = ContainerType | BaseType | StructType
-DefinitionType = BaseType | ContainerType
+FieldType :module = ContainerType(module) | BaseType | StructType(module)
+DefinitionType :module = BaseType | ContainerType(module)
 BaseType = ('bool' | 'byte' | 'i8' | 'i16' | 'i32' | 'i64' | 'double' | 'string' | 'binary'):ttype\
            -> BaseTType(ttype)
-ContainerType = (MapType | SetType | ListType):type brk immutable? -> type
-MapType = 'map' CppType? brk '<' brk FieldType:keyt brk ',' brk FieldType:valt brk '>' -> TType.MAP, (keyt, valt)
-SetType = 'set' CppType? brk '<' brk FieldType:valt brk '>' -> TType.SET, valt
-ListType = 'list' brk '<' brk FieldType:valt brk '>' brk CppType? -> TType.LIST, valt
-StructType = Identifier:name -> TType.STRUCT, name
+ContainerType :module = (MapType(module) | SetType(module) | ListType(module)):type brk immutable? -> type
+MapType :module = 'map' CppType? brk '<' brk FieldType(module):keyt brk ',' brk FieldType(module):valt brk '>' -> TType.MAP, (keyt, valt)
+SetType :module = 'set' CppType? brk '<' brk FieldType(module):valt brk '>' -> TType.SET, valt
+ListType :module = 'list' brk '<' brk FieldType(module):valt brk '>' brk CppType? -> TType.LIST, valt
+StructType :module = identifier_ref(module):name -> TType.STRUCT, name
 CppType = 'cpp_type' Literal -> None
 # Constant Values
 ConstValue :module = DoubleConstant | IntConstant | ConstList(module) | ConstMap(module) | Literal | identifier_ref(module)
@@ -383,7 +403,7 @@ PARSER = parsley.makeGrammar(
     GRAMMAR, 
     {
         'Document': collections.namedtuple('Document', 'headers definitions'),
-        #'Include': _add_include,
+        'Include': _add_include,
         'Definition': _add_definition,
         'Enum': _make_enum,
         'Struct': _make_struct,
