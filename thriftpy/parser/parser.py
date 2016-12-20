@@ -166,6 +166,147 @@ def parse_fp(source, module_name, enable_cache=True):
     return MODULE_LOADER.load_data(source.read(), module_name, cache=enable_cache)
 
 
+def _cast(t):  # noqa
+    if t == TType.BOOL:
+        return _cast_bool
+    if t == TType.BYTE:
+        return _cast_byte
+    if t == TType.I16:
+        return _cast_i16
+    if t == TType.I32:
+        return _cast_i32
+    if t == TType.I64:
+        return _cast_i64
+    if t == TType.DOUBLE:
+        return _cast_double
+    if t == TType.STRING:
+        return _cast_string
+    if t == TType.BINARY:
+        return _cast_binary
+    if t[0] == TType.LIST:
+        return _cast_list(t)
+    if t[0] == TType.SET:
+        return _cast_set(t)
+    if t[0] == TType.MAP:
+        return _cast_map(t)
+    if t[0] == TType.I32:
+        return _cast_enum(t)
+    if t[0] == TType.STRUCT:
+        return _cast_struct(t)
+
+
+def _cast_bool(v):
+    assert isinstance(v, (bool, int))
+    return bool(v)
+
+
+def _cast_byte(v):
+    assert isinstance(v, int)
+    return v
+
+
+def _cast_i16(v):
+    assert isinstance(v, int)
+    return v
+
+
+def _cast_i32(v):
+    assert isinstance(v, int)
+    return v
+
+
+def _cast_i64(v):
+    assert isinstance(v, int)
+    return v
+
+
+def _cast_double(v):
+    assert isinstance(v, (float, int))
+    return float(v)
+
+
+def _cast_string(v):
+    assert isinstance(v, str)
+    return v
+
+
+def _cast_binary(v):
+    assert isinstance(v, str)
+    return v
+
+
+def _cast_list(t):
+    assert t[0] == TType.LIST
+
+    def __cast_list(v):
+        assert isinstance(v, list)
+        map(_cast(t[1]), v)
+        return v
+    return __cast_list
+
+
+def _cast_set(t):
+    assert t[0] == TType.SET
+
+    def __cast_set(v):
+        assert isinstance(v, (list, set))
+        map(_cast(t[1]), v)
+        if not isinstance(v, set):
+            return set(v)
+        return v
+    return __cast_set
+
+
+def _cast_map(t):
+    assert t[0] == TType.MAP
+
+    def __cast_map(v):
+        assert isinstance(v, dict)
+        for key in v:
+            v[_cast(t[1][0])(key)] = \
+                _cast(t[1][1])(v[key])
+        return v
+    return __cast_map
+
+
+def _cast_enum(t):
+    assert t[0] == TType.I32
+
+    def __cast_enum(v):
+        assert isinstance(v, int)
+        if v in t[1]._VALUES_TO_NAMES:
+            return v
+        raise ThriftParserError('Couldn\'t find a named value in enum '
+                                '%s for value %d' % (t[1].__name__, v))
+    return __cast_enum
+
+
+def _cast_struct(t):   # struct/exception/union
+    assert t[0] == TType.STRUCT
+
+    def __cast_struct(v):
+        if isinstance(v, t[1]):
+            return v  # already cast
+
+        assert isinstance(v, dict)
+        tspec = getattr(t[1], '_tspec')
+
+        for key in tspec:  # requirement check
+            if tspec[key][0] and key not in v:
+                raise ThriftParserError('Field %r was required to create '
+                                        'constant for type %r' %
+                                        (key, t[1].__name__))
+
+        for key in v:  # cast values
+            if key not in tspec:
+                raise ThriftParserError('No field named %r was '
+                                        'found in struct of type %r' %
+                                        (key, t[1].__name__))
+            v[key] = _cast(tspec[key][1])(v[key])
+        return t[1](**v)
+    return __cast_struct
+
+
 def _make_enum(name, kvs, module):
     attrs = {'__module__': module.__name__, '_ttype': TType.I32}
     cls = type(name, (object, ), attrs)
@@ -278,6 +419,10 @@ def _make_exception(name, fields, module):
     return _make_struct(name, fields, module, base_cls=TException)
 
 
+def _make_const(name, val, ttype):
+    return 'const', name, val, _cast(ttype)(val)
+
+
 def _add_definition(module, type, name, val, ttype):
     module.__thrift_meta__[type + 's'].append(val)
     module.__dict__[name] = val
@@ -311,8 +456,8 @@ NamespaceScope = ('*' | 'cpp' | 'java' | 'py.twisted' | 'py' | 'perl' | 'rb' | '
 unsupported_namespacescope = Identifier
 Definition :module = brk (Const(module) | Typedef(module) | Enum(module) | Struct(module) | Union(module) |
                            Exception(module) | Service(module)):defn -> Definition(module, *defn)
-Const :module = 'const' brk FieldType(module):type brk Identifier:name brk '='\
-    brk ConstValue(module):val brk ListSeparator? -> 'const', name, val, type
+Const :module = 'const' brk FieldType(module):ttype brk Identifier:name brk '='\
+    brk ConstValue(module ttype):val brk ListSeparator? -> 'const', name, val, ttype
 Typedef :module = 'typedef' brk DefinitionType(module):type brk Identifier:alias -> 'typedef', alias, type, None
 Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
                 -> 'enum', name, Enum(name, vals, module), None 
@@ -327,7 +472,7 @@ Service :module =\
     'service' brk Identifier:name brk ('extends' identifier_ref(module))?:extends '{' (brk Function(module))*:funcs brk '}'\
     -> 'service', name, Service(name, funcs, extends, module), None
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
-    ('=' brk ConstValue(module))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
+    ('=' brk ConstValue(module ttype))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = IntConstant:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
@@ -347,12 +492,14 @@ ListType :module = 'list' brk '<' brk FieldType(module):valt brk '>' brk CppType
 StructType :module = identifier_ref(module):name -> TType.STRUCT, name
 CppType = 'cpp_type' Literal -> None
 # Constant Values
-ConstValue :module = DoubleConstant | IntConstant | ConstList(module) | ConstMap(module) | Literal | identifier_ref(module)
+ConstValue :module :ttype = DoubleConstant | IntConstant | BoolConstant | ConstList(module ttype) | ConstMap(module ttype) | Literal | identifier_ref(module)
 IntConstant = <('+' | '-')? Digit+>:val -> int(val)
 DoubleConstant = <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') IntConstant)?>:val !(float(val)):fval\
                  -> fval if fval and fval % 1 else int(fval)  # favor integer representation if it is exact
-ConstList :module = '[' (brk ConstValue(module):val ListSeparator? -> val)*:vals ']' -> vals
-ConstMap :module = '{' (brk ConstValue(module):key ':' ConstValue(module):val ListSeparator? -> key, val)*:items '}' -> dict(items)
+BoolConstant = ('true' | 'false'):val -> val == 'true'
+ConstList :module :ttype = '[' (brk ConstValue(module ttype[1]):val ListSeparator? -> val)*:vals ']' -> vals
+ConstMap :module :ttype = '{' (brk ConstValue(module ttype[1][0]):key ':' brk ConstValue(module ttype[1][1]):val ListSeparator?\
+                          -> key, val)*:items '}' -> dict(items)
 # Basic Definitions
 Literal = (('"' <(~'"' anything)*>:val '"') | ("'" <(~"'" anything)*>:val "'")) -> val
 Identifier = not_reserved <(Letter | '_') (Letter | Digit | '.' | '_')*>
@@ -409,6 +556,7 @@ PARSER = parsley.makeGrammar(
         'Struct': _make_struct,
         'Union': _make_union,
         'Exception_': _make_exception,
+        'cast': _cast,
         'Service': _make_service,
         'Function': collections.namedtuple('Function', 'name ttype fields oneway throws'),
         'Field': collections.namedtuple('Field', 'id req ttype name default'),
