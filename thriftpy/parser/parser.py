@@ -166,109 +166,6 @@ def parse_fp(source, module_name, enable_cache=True):
     return MODULE_LOADER.load_data(source.read(), module_name, cache=enable_cache)
 
 
-def _cast(t):  # noqa
-    if t == TType.BOOL:
-        return _cast_bool
-    if t == TType.BYTE:
-        return _cast_byte
-    if t == TType.I16:
-        return _cast_i16
-    if t == TType.I32:
-        return _cast_i32
-    if t == TType.I64:
-        return _cast_i64
-    if t == TType.DOUBLE:
-        return _cast_double
-    if t == TType.STRING:
-        return _cast_string
-    if t == TType.BINARY:
-        return _cast_binary
-    if t[0] == TType.LIST:
-        return _cast_list(t)
-    if t[0] == TType.SET:
-        return _cast_set(t)
-    if t[0] == TType.MAP:
-        return _cast_map(t)
-    if t[0] == TType.I32:
-        return _cast_enum(t)
-    if t[0] == TType.STRUCT:
-        return _cast_struct(t)
-
-
-def _cast_bool(v):
-    assert isinstance(v, (bool, int))
-    return bool(v)
-
-
-def _cast_byte(v):
-    assert isinstance(v, int)
-    return v
-
-
-def _cast_i16(v):
-    assert isinstance(v, int)
-    return v
-
-
-def _cast_i32(v):
-    assert isinstance(v, int)
-    return v
-
-
-def _cast_i64(v):
-    assert isinstance(v, int)
-    return v
-
-
-def _cast_double(v):
-    assert isinstance(v, (float, int))
-    return float(v)
-
-
-def _cast_string(v):
-    assert isinstance(v, str)
-    return v
-
-
-def _cast_binary(v):
-    assert isinstance(v, str)
-    return v
-
-
-def _cast_list(t):
-    assert t[0] == TType.LIST
-
-    def __cast_list(v):
-        assert isinstance(v, list)
-        map(_cast(t[1]), v)
-        return v
-    return __cast_list
-
-
-def _cast_set(t):
-    assert t[0] == TType.SET
-
-    def __cast_set(v):
-        assert isinstance(v, (list, set))
-        map(_cast(t[1]), v)
-        if not isinstance(v, set):
-            return set(v)
-        return v
-    return __cast_set
-
-
-def _cast_map(t):
-    assert t[0] == TType.MAP
-
-    def __cast_map(v):
-        assert isinstance(v, dict)
-        for key in v:
-            v[_cast(t[1][0])(key)] = \
-                _cast(t[1][1])(v[key])
-        return v
-    return __cast_map
-
-
 def _cast_enum(t):
     assert t[0] == TType.I32
 
@@ -279,32 +176,6 @@ def _cast_enum(t):
         raise ThriftParserError('Couldn\'t find a named value in enum '
                                 '%s for value %d' % (t[1].__name__, v))
     return __cast_enum
-
-
-def _cast_struct(t):   # struct/exception/union
-    assert t[0] == TType.STRUCT
-
-    def __cast_struct(v):
-        if isinstance(v, t[1]):
-            return v  # already cast
-
-        assert isinstance(v, dict)
-        tspec = getattr(t[1], '_tspec')
-
-        for key in tspec:  # requirement check
-            if tspec[key][0] and key not in v:
-                raise ThriftParserError('Field %r was required to create '
-                                        'constant for type %r' %
-                                        (key, t[1].__name__))
-
-        for key in v:  # cast values
-            if key not in tspec:
-                raise ThriftParserError('No field named %r was '
-                                        'found in struct of type %r' %
-                                        (key, t[1].__name__))
-            v[key] = _cast(tspec[key][1])(v[key])
-        return t[1](**v)
-    return __cast_struct
 
 
 def _make_enum(name, kvs, module):
@@ -461,7 +332,7 @@ Const :module = 'const' brk FieldType(module):ttype brk Identifier:name brk '='\
 Typedef :module = 'typedef' brk DefinitionType(module):type brk Identifier:alias -> 'typedef', alias, type, None
 Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
                 -> 'enum', name, Enum(name, vals, module), None 
-enum_item = brk Identifier:name brk ('=' brk IntConstant)?:value brk ListSeparator? brk -> name, value
+enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk ListSeparator? brk -> name, value
 Struct :module = 'struct' brk name_fields(module):nf brk immutable?\
                   -> 'struct', nf[0], Struct(nf[0], nf[1], module), None
 Union :module = 'union' brk name_fields(module):nf -> 'union', nf[0], Union(nf[0], nf[1], module), None
@@ -473,7 +344,7 @@ Service :module =\
     -> 'service', name, Service(name, funcs, extends, module), None
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
     ('=' brk ConstValue(module ttype))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
-FieldID = IntConstant:val ':' -> val
+FieldID = int_val:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
 Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name '(' (brk Field(module)*):fs ')'\
@@ -492,14 +363,26 @@ ListType :module = 'list' brk '<' brk FieldType(module):valt brk '>' brk CppType
 StructType :module = identifier_ref(module):name -> TType.STRUCT, name
 CppType = 'cpp_type' Literal -> None
 # Constant Values
-ConstValue :module :ttype = DoubleConstant | IntConstant | BoolConstant | ConstList(module ttype) | ConstMap(module ttype) | Literal | identifier_ref(module)
-IntConstant = <('+' | '-')? Digit+>:val -> int(val)
-DoubleConstant = <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') IntConstant)?>:val !(float(val)):fval\
+ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntConstant | ConstList(module ttype)\
+                            | ConstSet(module ttype) | ConstMap(module ttype) | ConstStruct(module ttype)\
+                            | Literal | identifier_ref(module)
+int_val = <('+' | '-')? Digit+>:val -> int(val)
+IntConstant = int_val:val
+DoubleConstant :ttype = check_ttype(TType.DOUBLE ttype) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val !(float(val)):fval\
                  -> fval if fval and fval % 1 else int(fval)  # favor integer representation if it is exact
-BoolConstant = ('true' | 'false'):val -> val == 'true'
-ConstList :module :ttype = '[' (brk ConstValue(module ttype[1]):val ListSeparator? -> val)*:vals ']' -> vals
-ConstMap :module :ttype = '{' (brk ConstValue(module ttype[1][0]):key ':' brk ConstValue(module ttype[1][1]):val ListSeparator?\
-                          -> key, val)*:items '}' -> dict(items)
+BoolConstant :ttype = check_ttype(TType.BOOL ttype) \
+                      ((('true' | 'false'):val -> val == 'true') | (int_val:val -> bool(val)))
+ConstList :module :ttype = check_ttype(TType.LIST ttype) array_vals(module ttype[1])
+ConstSet :module :ttype = check_ttype(TType.SET ttype) array_vals(module ttype[1]):vals -> set(vals)
+array_vals :module :ttype = '[' (brk ConstValue(module ttype):val ListSeparator? -> val)*:vals ']' -> vals
+ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
+    '{' (brk ConstValue(module ttype[1][0]):key ':' \
+        brk ConstValue(module ttype[1][1]):val ListSeparator? -> key, val)*:items '}'\
+    -> dict(items)
+ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
+    '{' (brk Literal:name ':' brk !(ttype[1]._tspec[name]):attr_ttype ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items '}'\
+    -> ttype[1](**dict(items))
+check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
 Literal = (('"' <(~'"' anything)*>:val '"') | ("'" <(~"'" anything)*>:val "'")) -> val
 Identifier = not_reserved <(Letter | '_') (Letter | Digit | '.' | '_')*>
@@ -507,10 +390,12 @@ identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresol
 ListSeparator = ',' | ';'
 Letter = letter  # parsley built-in
 Digit = digit  # parsley built-in
-Comment = cpp_comment | c_comment
-brk = <(' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment)*>
-cpp_comment = '//' <('\\\n' | (~'\n' anything))*>
+Comment = cpp_comment | c_comment | python_comment
+brk = <(' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment | python_comment)*>
+cpp_comment = '//' rest_of_line
 c_comment = '/*' <(~'*/' anything)*>:body '*/' -> body
+python_comment = '#' rest_of_line
+rest_of_line = <('\\\n' | (~'\n' anything))*>
 immutable = '(' brk 'python.immutable' brk '=' brk '""' brk ')'
 Reserved = ('__CLASS__' | '__DIR__' | '__FILE__' | '__FUNCTION__' | '__LINE__' | '__METHOD__' |
             '__NAMESPACE__' | 'abstract' | 'alias' | 'and' | 'args' | 'as' | 'assert' | 'BEGIN' |
@@ -556,13 +441,12 @@ PARSER = parsley.makeGrammar(
         'Struct': _make_struct,
         'Union': _make_union,
         'Exception_': _make_exception,
-        'cast': _cast,
         'Service': _make_service,
         'Function': collections.namedtuple('Function', 'name ttype fields oneway throws'),
         'Field': collections.namedtuple('Field', 'id req ttype name default'),
         'IdentifierRef': _lookup_symbol,
         'BaseTType': BASE_TYPE_MAP.get,
-        'TType': TType
+        'TType': TType,
     }
 )
 
