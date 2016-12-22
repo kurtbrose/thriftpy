@@ -298,6 +298,7 @@ def _make_service(name, funcs, extends, module):
         if func.ttype != TType.VOID:
             result_cls.thrift_spec[0] = _ttype_spec(func.ttype, 'success')
             result_cls.default_spec.insert(0, ('success', None))
+        gen_init(result_cls, result_cls.thrift_spec, result_cls.default_spec)
         setattr(cls, result_name, result_cls)
         thrift_services.append(func.name)
     if extends is not None and hasattr(extends, 'thrift_services'):
@@ -362,7 +363,9 @@ def _ref_type(module, name):
     val = _lookup_symbol(module, name)
     if val in BASE_TYPE_MAP.values():
         return val
-    return TType.STRUCT, val
+    if isinstance(val, tuple):  # typedef
+        return val
+    return val._ttype, val  # struct or enum
 
 
 def _ref_val(module, name):
