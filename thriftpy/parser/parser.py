@@ -29,8 +29,8 @@ class ModuleLoader(object):
     def load(self, path, module_name):
         return self._load(path, True, module_name=module_name)
 
-    def load_data(self, data, module_name):
-        return self._load_data(data, module_name, False)
+    def load_data(self, data, module_name, load_includes=False):
+        return self._load_data(data, module_name, load_includes=load_includes)
 
     def _load(self, path, load_includes, sofar=(), module_name=None):
         if not path.endswith('.thrift'):
@@ -47,8 +47,10 @@ class ModuleLoader(object):
         if abs_path in sofar:
             cycle = sofar[sofar.index(abs_path):] + (abs_path,)
             path_to_cycle = sofar[:sofar.index(abs_path)]
-            raise ImportError('circular import:\n{}\nvia:\n{}'.format(
-                '->\n'.join(cycle), '->\n'.join(path_to_cycle)))
+            msg = 'circular import:\n{}'.format(' ->\n'.join(cycle))
+            if path_to_cycle:
+                msg += "\nvia:\n{}".format(' ->\n'.join(path_to_cycle))
+            raise ImportError(msg)
         with open(abs_path, 'rb') as f:
             data = f.read()
         if module_name is None:
@@ -132,7 +134,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         basename = os.path.basename(path)
         module_name = os.path.splitext(basename)[0]
 
-    module = MODULE_LOADER.load(path, module_name)
+    module = MODULE_LOADER.load_data(data, module_name, True)
     if not enable_cache:
         del MODULE_LOADER.modules[module_name]
     return module
@@ -156,14 +158,21 @@ def parse_fp(source, module_name, enable_cache=True):
         raise ThriftParserError('ThriftPy can only generate module with '
                                 '\'_thrift\' suffix')
 
-    if enable_cache and module_name in MODULE_LOADER.thrift_cache:
-        return MODULE_LOADER.thrift_cache[module_name]
+    if enable_cache and module_name in MODULE_LOADER.modules:
+        return MODULE_LOADER.modules[module_name]
 
     if not hasattr(source, 'read'):
         raise ThriftParserError('Except `source` to be a file-like object with'
                                 'a method named \'read\'')
 
-    return MODULE_LOADER.load_data(source.read(), module_name, cache=enable_cache)
+    if enable_cache:
+        module = MODULE_LOADER.load_data(source.read(), module_name)
+    else:  # throw-away isolated ModuleLoader instance
+        return ModuleLoader().load_data(source.read(), module_name)
+
+    module.__thrift_file__ = None
+
+    return module
 
 
 def _cast_enum(t):
@@ -176,6 +185,31 @@ def _cast_enum(t):
         raise ThriftParserError('Couldn\'t find a named value in enum '
                                 '%s for value %d' % (t[1].__name__, v))
     return __cast_enum
+
+
+def _cast_struct(t):   # struct/exception/union
+    assert t[0] == TType.STRUCT
+
+    def __cast_struct(v):
+        if isinstance(v, t[1]):
+            return v  # already cast
+
+        assert isinstance(v, dict)
+        tspec = getattr(t[1], '_tspec')
+
+        for key in tspec:  # requirement check
+            if tspec[key][0] and key not in v:
+                raise ThriftParserError('Field %r was required to create '
+                                        'constant for type %r' %
+                                        (key, t[1].__name__))
+
+        for key in v:  # cast values
+            if key not in tspec:
+                raise ThriftParserError('No field named %r was '
+                                        'found in struct of type %r' %
+                                        (key, t[1].__name__))
+        return t[1](**v)
+    return __cast_struct
 
 
 def _make_enum(name, kvs, module):
@@ -194,7 +228,7 @@ def _make_enum(name, kvs, module):
                 val = val + 1
             else:
                 val = item[1]
-        for key, val in kvs:
+            key = item[0]
             setattr(cls, key, val)
             _values_to_names[val] = key
             _names_to_values[key] = val
@@ -220,7 +254,7 @@ def _fill_in_struct(cls, fields, _gen_init=True):
                                                               field.name))
         thrift_spec[field.id] = _ttype_spec(field.ttype, field.name, field.req)
         default_spec.append((field.name, field.default))
-        _tspec[field.name] = field.req, field.ttype
+        _tspec[field.name] = field.req == 'required', field.ttype
     setattr(cls, 'thrift_spec', thrift_spec)
     setattr(cls, 'default_spec', default_spec)
     setattr(cls, '_tspec', _tspec)
@@ -317,7 +351,7 @@ def _lookup_symbol(module, identifier):
 GRAMMAR = '''
 Document :module :load_module = (brk Header(module load_module))*:hs (brk Definition(module))*:ds brk -> Document(hs, ds)
 Header :module :load_module = <Include(module load_module) | Namespace>
-Include :module :load_module = brk 'include' brk Literal:path -> Include(module, path, load_module)
+Include :module :load_module = brk 'include' brk Literal:path ListSeparator? -> Include(module, path, load_module)
 Namespace =\
     brk 'namespace' brk <((NamespaceScope ('.' Identifier)?)| unsupported_namespacescope)>:scope brk\
         Identifier:name brk uri? -> 'namespace', scope, name
@@ -340,14 +374,14 @@ Exception :module = 'exception' brk name_fields(module):nf\
                      -> 'exception', nf[0], Exception_(nf[0], nf[1], module), None
 name_fields :module = Identifier:name brk '{' (brk Field(module))*:fields brk '}' -> name, fields
 Service :module =\
-    'service' brk Identifier:name brk ('extends' identifier_ref(module))?:extends '{' (brk Function(module))*:funcs brk '}'\
+    'service' brk Identifier:name brk ('extends' brk identifier_ref(module))?:extends brk '{' (brk Function(module))*:funcs brk '}'\
     -> 'service', name, Service(name, funcs, extends, module), None
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
     ('=' brk ConstValue(module ttype))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = int_val:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
-Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name '(' (brk Field(module)*):fs ')'\
+Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name brk '(' (brk Field(module)*):fs ')'\
      brk Throws(module)?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
 FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
@@ -377,11 +411,12 @@ ConstSet :module :ttype = check_ttype(TType.SET ttype) array_vals(module ttype[1
 array_vals :module :ttype = '[' (brk ConstValue(module ttype):val ListSeparator? -> val)*:vals ']' -> vals
 ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
     '{' (brk ConstValue(module ttype[1][0]):key ':' \
-        brk ConstValue(module ttype[1][1]):val ListSeparator? -> key, val)*:items '}'\
+        brk ConstValue(module ttype[1][1]):val ListSeparator? -> key, val)*:items brk '}' brk\
     -> dict(items)
 ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
-    '{' (brk Literal:name ':' brk !(ttype[1]._tspec[name]):attr_ttype ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items '}'\
-    -> ttype[1](**dict(items))
+    '{' (brk Literal:name ':' brk !(ttype[1]._tspec[name][1]):attr_ttype \
+        ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
+    -> _cast_struct(ttype)(dict(items))
 check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
 Literal = (('"' <(~'"' anything)*>:val '"') | ("'" <(~"'" anything)*>:val "'")) -> val
@@ -447,6 +482,7 @@ PARSER = parsley.makeGrammar(
         'IdentifierRef': _lookup_symbol,
         'BaseTType': BASE_TYPE_MAP.get,
         'TType': TType,
+        '_cast_struct': _cast_struct,
     }
 )
 
