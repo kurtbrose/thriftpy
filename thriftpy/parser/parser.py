@@ -50,7 +50,7 @@ class ModuleLoader(object):
             msg = 'circular import:\n{}'.format(' ->\n'.join(cycle))
             if path_to_cycle:
                 msg += "\nvia:\n{}".format(' ->\n'.join(path_to_cycle))
-            raise ImportError(msg)
+            raise CircularInclude(msg)
         with open(abs_path, 'rb') as f:
             data = f.read()
         if module_name is None:
@@ -58,20 +58,26 @@ class ModuleLoader(object):
         return self._load_data(data, module_name, load_includes, sofar + (abs_path,))
 
     def _cant_load(self, path, *a, **kw):
-        raise ParseError('cannot include sub-modules')
+        raise ThriftParserError('unexpected include statement while loading from data')
 
     def _load_data(self, data, module_name, load_includes, sofar=()):
         if module_name in self.modules:
             return self.modules[module_name]
         module = types.ModuleType(module_name)
         module.__thrift_meta__ = collections.defaultdict(list)
-        if not load_includes:
-            document = PARSER(data).Document(module, self._cant_load)
-        else:
-            document = PARSER(data).Document(
-                module, lambda path: self._load(path, load_includes, sofar))
+        try:
+            if not load_includes:
+                document = PARSER(data).Document(module, self._cant_load)
+            else:
+                document = PARSER(data).Document(
+                    module, lambda path: self._load(path, load_includes, sofar))
+        except parsley.ParseError as pe:
+            raise ThriftParserError(pe)
         self.modules[module_name] = module
         return self.modules[module_name]
+
+
+class CircularInclude(ThriftParserError, ImportError): pass
 
 
 MODULE_LOADER = ModuleLoader()
@@ -338,10 +344,44 @@ def _add_include(module, path, loadf):
 
 
 def _lookup_symbol(module, identifier):
-    val = module
-    for rel_name in identifier.split('.'):
-        val = getattr(val, rel_name)
+    try:
+        val = module
+        for rel_name in identifier.split('.'):
+            val = getattr(val, rel_name)
+        return val
+    except AttributeError:
+        raise UnresovledReferenceError(
+            'could not resolve name {} in module {}'.format(identifier, module.__name__))
+
+
+class UnresovledReferenceError(ThriftParserError): pass
+
+
+def _ref_type(module, name):
+    'resolve a reference to a type, return the resulting ttype'
+    val = _lookup_symbol(module, name)
+    if val in BASE_TYPE_MAP.values():
+        return val
+    return TType.STRUCT, val
+
+
+def _ref_val(module, name):
+    'resolve a reference to a value, return the value'
+    val = _lookup_symbol(module, name)
+    if isinstance(val, type):
+        raise UnresovledReferenceError("{} in {} is a type, not a value".format(name, module))
     return val
+
+
+class NoSuchAttribute(ThriftParserError): pass
+
+
+def _attr_ttype(struct, attr):
+    'return the ttype of attr in struct'
+    if attr not in struct._tspec:
+        raise NoSuchAttribute('no attribute {} of struct {} in module {}'.format(
+            attr, struct.__name__, struct.__module__))
+    return struct._tspec[attr][1]
 
 
 GRAMMAR = '''
@@ -386,7 +426,7 @@ Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:n
 FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
 # Types
-FieldType :module = (ContainerType(module) | BaseType | StructType(module)):ttype brk annotations brk -> ttype
+FieldType :module = (ContainerType(module) | BaseType | RefType(module)):ttype brk annotations brk -> ttype
 DefinitionType :module = BaseType | ContainerType(module)
 BaseType = ('bool' | 'byte' | 'i8' | 'i16' | 'i32' | 'i64' | 'double' | 'string' | 'binary'):ttype\
            -> BaseTType(ttype)
@@ -394,18 +434,20 @@ ContainerType :module = (MapType(module) | SetType(module) | ListType(module)):t
 MapType :module = 'map' CppType? brk '<' brk FieldType(module):keyt brk ',' brk FieldType(module):valt brk '>' -> TType.MAP, (keyt, valt)
 SetType :module = 'set' CppType? brk '<' brk FieldType(module):valt brk '>' -> TType.SET, valt
 ListType :module = 'list' brk '<' brk FieldType(module):valt brk '>' brk CppType? -> TType.LIST, valt
-StructType :module = identifier_ref(module):name -> TType.STRUCT, name
+RefType :module = Identifier:name !(_ref_type(module, name))
+RefVal :module = Identifier:name !(_ref_val(module, name))
 CppType = 'cpp_type' Literal -> None
 # Constant Values
-ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntConstant | ConstList(module ttype)\
+ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntConstant(ttype) | ConstList(module ttype)\
                             | ConstSet(module ttype) | ConstMap(module ttype) | ConstStruct(module ttype)\
-                            | Literal | identifier_ref(module)
+                            | ConstLiteral(ttype) | RefVal(module)
 int_val = <('+' | '-')? Digit+>:val -> int(val)
-IntConstant = int_val:val
-DoubleConstant :ttype = check_ttype(TType.DOUBLE ttype) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val\
+IntConstant :ttype = ?(ttype in (TType.BYTE, TType.I16, TType.I32, TType.I64)) int_val
+DoubleConstant :ttype = ?(ttype == TType.DOUBLE) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val\
                  -> float(val)
-BoolConstant :ttype = check_ttype(TType.BOOL ttype) \
+BoolConstant :ttype = ?(ttype == TType.BOOL) \
                       ((('true' | 'false'):val -> val == 'true') | (int_val:val -> bool(val)))
+ConstLiteral :ttype = ?(ttype in (TType.STRING, TType.BINARY)) Literal
 ConstList :module :ttype = check_ttype(TType.LIST ttype) array_vals(module ttype[1])
 ConstSet :module :ttype = check_ttype(TType.SET ttype) array_vals(module ttype[1]):vals -> set(vals)
 array_vals :module :ttype = '[' (brk ConstValue(module ttype):val ListSeparator? -> val)*:vals ']' -> vals
@@ -414,7 +456,7 @@ ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
         brk ConstValue(module ttype[1][1]):val ListSeparator? -> key, val)*:items brk '}' brk\
     -> dict(items)
 ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
-    '{' (brk Literal:name ':' brk !(ttype[1]._tspec[name][1]):attr_ttype \
+    '{' (brk Literal:name ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
         ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
     -> _cast_struct(ttype)(dict(items))
 check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
@@ -488,6 +530,9 @@ PARSER = parsley.makeGrammar(
         'TType': TType,
         '_cast_struct': _cast_struct,
         'DeclareStruct': _make_empty_struct,
+        '_ref_type': _ref_type,
+        '_ref_val': _ref_val,
+        '_attr_ttype': _attr_ttype,
     }
 )
 
