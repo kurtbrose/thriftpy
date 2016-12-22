@@ -239,7 +239,8 @@ def _make_enum(name, kvs, module):
 
 def _make_empty_struct(name, module, ttype=TType.STRUCT, base_cls=TPayload):
     attrs = {'__module__': module.__name__, '_ttype': ttype}
-    return type(name, (base_cls, ), attrs)
+    module.__dict__[name] = type(name, (base_cls, ), attrs)
+    return module.__dict__[name]
 
 
 def _fill_in_struct(cls, fields, _gen_init=True):
@@ -315,11 +316,6 @@ def _get_ttype(inst, default_ttype=None):
     return default_ttype
 
 
-def _make_union(name, fields, module):
-    cls = _make_empty_struct(name, module)
-    return _fill_in_struct(cls, fields)
-
-
 def _make_exception(name, fields, module):
     return _make_struct(name, fields, module, base_cls=TException)
 
@@ -367,12 +363,14 @@ Typedef :module = 'typedef' brk DefinitionType(module):type brk Identifier:alias
 Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
                 -> 'enum', name, Enum(name, vals, module), None 
 enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk ListSeparator? brk -> name, value
-Struct :module = 'struct' brk name_fields(module):nf brk immutable?\
-                  -> 'struct', nf[0], Struct(nf[0], nf[1], module), None
-Union :module = 'union' brk name_fields(module):nf -> 'union', nf[0], Union(nf[0], nf[1], module), None
-Exception :module = 'exception' brk name_fields(module):nf\
-                     -> 'exception', nf[0], Exception_(nf[0], nf[1], module), None
-name_fields :module = Identifier:name brk '{' (brk Field(module))*:fields brk '}' -> name, fields
+Struct :module = 'struct' brk DeclareStruct(module):cls brk fields(module):fields brk immutable?\
+                 -> 'struct', cls.__name__, _fill_in_struct(cls, fields), None
+Union :module = 'union' brk DeclareStruct(module):cls brk fields(module):fields\
+                 -> 'union', cls.__name__, _fill_in_struct(cls, fields), None
+Exception :module = 'exception' brk Identifier:name brk fields(module):fields\
+                     -> 'exception', name, Exception_(name, fields, module), None
+DeclareStruct :module = Identifier:name !(DeclareStruct(name, module))
+fields :module = '{' (brk Field(module))*:fields brk '}' -> fields
 Service :module =\
     'service' brk Identifier:name brk ('extends' brk identifier_ref(module))?:extends brk '{' (brk Function(module))*:funcs brk '}'\
     -> 'service', name, Service(name, funcs, extends, module), None
@@ -473,8 +471,7 @@ PARSER = parsley.makeGrammar(
         'Include': _add_include,
         'Definition': _add_definition,
         'Enum': _make_enum,
-        'Struct': _make_struct,
-        'Union': _make_union,
+        '_fill_in_struct': _fill_in_struct,
         'Exception_': _make_exception,
         'Service': _make_service,
         'Function': collections.namedtuple('Function', 'name ttype fields oneway throws'),
@@ -483,6 +480,7 @@ PARSER = parsley.makeGrammar(
         'BaseTType': BASE_TYPE_MAP.get,
         'TType': TType,
         '_cast_struct': _cast_struct,
+        'DeclareStruct': _make_empty_struct,
     }
 )
 
