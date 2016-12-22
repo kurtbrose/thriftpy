@@ -181,41 +181,21 @@ def parse_fp(source, module_name, enable_cache=True):
     return module
 
 
-def _cast_enum(t):
-    assert t[0] == TType.I32
+def _cast_struct(t, v):   # struct/exception/union
+    tspec = getattr(t[1], '_tspec')
 
-    def __cast_enum(v):
-        assert isinstance(v, int)
-        if v in t[1]._VALUES_TO_NAMES:
-            return v
-        raise ThriftParserError('Couldn\'t find a named value in enum '
-                                '%s for value %d' % (t[1].__name__, v))
-    return __cast_enum
+    for key in tspec:  # requirement check
+        if tspec[key][0] and key not in v:
+            raise ThriftParserError('Field %r was required to create '
+                                    'constant for type %r' %
+                                    (key, t[1].__name__))
 
-
-def _cast_struct(t):   # struct/exception/union
-    assert t[0] == TType.STRUCT
-
-    def __cast_struct(v):
-        if isinstance(v, t[1]):
-            return v  # already cast
-
-        assert isinstance(v, dict)
-        tspec = getattr(t[1], '_tspec')
-
-        for key in tspec:  # requirement check
-            if tspec[key][0] and key not in v:
-                raise ThriftParserError('Field %r was required to create '
-                                        'constant for type %r' %
-                                        (key, t[1].__name__))
-
-        for key in v:  # cast values
-            if key not in tspec:
-                raise ThriftParserError('No field named %r was '
-                                        'found in struct of type %r' %
-                                        (key, t[1].__name__))
-        return t[1](**v)
-    return __cast_struct
+    for key in v:  # extra values check
+        if key not in tspec:
+            raise ThriftParserError('No field named %r was '
+                                    'found in struct of type %r' %
+                                    (key, t[1].__name__))
+    return t[1](**v)
 
 
 def _make_enum(name, kvs, module):
@@ -238,8 +218,8 @@ def _make_enum(name, kvs, module):
             setattr(cls, key, val)
             _values_to_names[val] = key
             _names_to_values[key] = val
-    setattr(cls, '_VALUES_TO_NAMES', _values_to_names)
-    setattr(cls, '_NAMES_TO_VALUES', _names_to_values)
+    cls.'_VALUES_TO_NAMES' = _values_to_names
+    cls.'_NAMES_TO_VALUES' = _names_to_values
     return cls
 
 
@@ -262,9 +242,9 @@ def _fill_in_struct(cls, fields, _gen_init=True):
         thrift_spec[field.id] = _ttype_spec(field.ttype, field.name, field.req)
         default_spec.append((field.name, field.default))
         _tspec[field.name] = field.req == 'required', field.ttype
-    setattr(cls, 'thrift_spec', thrift_spec)
-    setattr(cls, 'default_spec', default_spec)
-    setattr(cls, '_tspec', _tspec)
+    cls.thrift_spec = thrift_spec
+    cls.default_spec = default_spec
+    cls._tspec = _tspec
     if _gen_init:
         gen_init(cls, thrift_spec, default_spec)
     return cls
@@ -461,7 +441,7 @@ ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
 ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
     '{' (brk Literal:name ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
         ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
-    -> _cast_struct(ttype)(dict(items))
+    -> _cast_struct(ttype, dict(items))
 check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
 Literal = str_val_a | str_val_b
