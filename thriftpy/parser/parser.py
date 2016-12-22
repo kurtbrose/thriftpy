@@ -359,10 +359,11 @@ Definition :module = brk (Const(module) | Typedef(module) | Enum(module) | Struc
                            Exception(module) | Service(module)):defn -> Definition(module, *defn)
 Const :module = 'const' brk FieldType(module):ttype brk Identifier:name brk '='\
     brk ConstValue(module ttype):val brk ListSeparator? -> 'const', name, val, ttype
-Typedef :module = 'typedef' brk DefinitionType(module):type brk Identifier:alias -> 'typedef', alias, type, None
-Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}'\
+Typedef :module = 'typedef' brk DefinitionType(module):type brk annotations brk Identifier:alias brk annotations\
+                   -> 'typedef', alias, type, None
+Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}' brk annotations brk\
                 -> 'enum', name, Enum(name, vals, module), None 
-enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk ListSeparator? brk -> name, value
+enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk annotations ListSeparator? brk -> name, value
 Struct :module = 'struct' brk DeclareStruct(module):cls brk fields(module):fields brk immutable?\
                  -> 'struct', cls.__name__, _fill_in_struct(cls, fields), None
 Union :module = 'union' brk DeclareStruct(module):cls brk fields(module):fields\
@@ -370,12 +371,13 @@ Union :module = 'union' brk DeclareStruct(module):cls brk fields(module):fields\
 Exception :module = 'exception' brk Identifier:name brk fields(module):fields\
                      -> 'exception', name, Exception_(name, fields, module), None
 DeclareStruct :module = Identifier:name !(DeclareStruct(name, module))
-fields :module = '{' (brk Field(module))*:fields brk '}' -> fields
+fields :module = '{' (brk Field(module))*:fields brk '}' brk annotations brk -> fields
 Service :module =\
-    'service' brk Identifier:name brk ('extends' brk identifier_ref(module))?:extends brk '{' (brk Function(module))*:funcs brk '}'\
+    'service' brk Identifier:name brk ('extends' brk identifier_ref(module))?:extends brk\
+        '{' (brk Function(module))*:funcs brk annotations brk '}' brk annotations brk\
     -> 'service', name, Service(name, funcs, extends, module), None
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
-    ('=' brk ConstValue(module ttype))?:default brk ListSeparator? -> Field(id, req, ttype, name, default)
+    ('=' brk ConstValue(module ttype))?:default brk annotations brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = int_val:val ':' -> val
 FieldReq = 'required' | 'optional' | !('default')
 # Functions
@@ -384,7 +386,7 @@ Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:n
 FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
 # Types
-FieldType :module = ContainerType(module) | BaseType | StructType(module)
+FieldType :module = (ContainerType(module) | BaseType | StructType(module)):ttype brk annotations brk -> ttype
 DefinitionType :module = BaseType | ContainerType(module)
 BaseType = ('bool' | 'byte' | 'i8' | 'i16' | 'i32' | 'i64' | 'double' | 'string' | 'binary'):ttype\
            -> BaseTType(ttype)
@@ -400,8 +402,8 @@ ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntCon
                             | Literal | identifier_ref(module)
 int_val = <('+' | '-')? Digit+>:val -> int(val)
 IntConstant = int_val:val
-DoubleConstant :ttype = check_ttype(TType.DOUBLE ttype) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val !(float(val)):fval\
-                 -> fval if fval and fval % 1 else int(fval)  # favor integer representation if it is exact
+DoubleConstant :ttype = check_ttype(TType.DOUBLE ttype) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val\
+                 -> float(val)
 BoolConstant :ttype = check_ttype(TType.BOOL ttype) \
                       ((('true' | 'false'):val -> val == 'true') | (int_val:val -> bool(val)))
 ConstList :module :ttype = check_ttype(TType.LIST ttype) array_vals(module ttype[1])
@@ -417,9 +419,14 @@ ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
     -> _cast_struct(ttype)(dict(items))
 check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
-Literal = (('"' <(~'"' anything)*>:val '"') | ("'" <(~"'" anything)*>:val "'")) -> val
+Literal = str_val_a | str_val_b
+# 2 levels of string interpolation = \\\\ to get slash literal
+str_val_a = '"' <(('\\\\' '"') | (~'"' anything))*>:val '"' -> val
+str_val_b = "'" <(('\\\\' "'") | (~"'" anything))*>:val "'" -> val
 Identifier = not_reserved <(Letter | '_') (Letter | Digit | '.' | '_')*>
 identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
+annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # always optional
+annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
 ListSeparator = ',' | ';'
 Letter = letter  # parsley built-in
 Digit = digit  # parsley built-in
