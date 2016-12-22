@@ -218,8 +218,8 @@ def _make_enum(name, kvs, module):
             setattr(cls, key, val)
             _values_to_names[val] = key
             _names_to_values[key] = val
-    cls.'_VALUES_TO_NAMES' = _values_to_names
-    cls.'_NAMES_TO_VALUES' = _names_to_values
+    cls._VALUES_TO_NAMES = _values_to_names
+    cls._NAMES_TO_VALUES = _names_to_values
     return cls
 
 
@@ -402,7 +402,7 @@ Service :module =\
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
     ('=' brk ConstValue(module ttype))?:default brk annotations brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = int_val:val ':' -> val
-FieldReq = 'required' | 'optional' | !('default')
+FieldReq = 'required' | 'optional' | !(b'default')
 # Functions
 Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name brk '(' (brk Field(module)*):fs ')'\
      brk Throws(module)?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
@@ -484,15 +484,15 @@ not_reserved = ~(Reserved (' ' | '\t' | '\n'))
 
 
 BASE_TYPE_MAP = {
-    'bool': TType.BOOL,
-    'byte': TType.BYTE,
-    'i8': TType.BYTE,
-    'i16': TType.I16,
-    'i32': TType.I32,
-    'i64': TType.I64,
-    'double': TType.DOUBLE,
-    'string': TType.STRING,
-    'binary': TType.BINARY
+    b'bool': TType.BOOL,
+    b'byte': TType.BYTE,
+    b'i8': TType.BYTE,
+    b'i16': TType.I16,
+    b'i32': TType.I32,
+    b'i64': TType.I64,
+    b'double': TType.DOUBLE,
+    b'string': TType.STRING,
+    b'binary': TType.BINARY
 }
 
 
