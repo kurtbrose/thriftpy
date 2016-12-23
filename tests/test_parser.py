@@ -1,9 +1,35 @@
 # -*- coding: utf-8 -*-
 
 import pytest
+import types
 from thriftpy.thrift import TType
 from thriftpy.parser import load, load_fp
+from thriftpy.parser.parser import PARSER, ModuleLoader
 from thriftpy.parser.exc import ThriftParserError, ThriftGrammerError
+
+
+def test_grammar():
+    # just check that these valid things don't raise an exception
+    assert PARSER('string_thing').Identifier() == 'string_thing'
+    PARSER('Numberz.ONE').Identifier()
+    assert PARSER('list<binary>').ListType(types.ModuleType('<string>')) == (TType.LIST, TType.BINARY)
+    PARSER('''{
+      1: bool im_true,
+      2: bool im_false,
+    }''').fields(types.ModuleType('<string>'))
+    PARSER('typedef i64 UserId').Typedef(types.ModuleType('<string>'))
+    PARSER('typedef map<string,i8> MapType').Typedef(types.ModuleType('<string>'))
+    PARSER('namespace /* */ cpp.noexist /* */ ThriftTest').Namespace()
+    PARSER('enum Foo { VAL1 = 8 VAL2 = 10 }').Enum(types.ModuleType('<string>'))
+    PARSER('service Foo { void foo() }').Service(types.ModuleType('<string>'))
+    PARSER('union Foo { 1: string s }').Union(types.ModuleType('<string>'))
+    PARSER('union Foo { 1: Foo first 2: string second }').Union(types.ModuleType('<string>'))
+
+
+def test_module_loader():
+    ml = ModuleLoader()
+    assert ml.load_data('typedef i64 Timestamp', 'ts_module').Timestamp == TType.I64
+    assert ml.load_data(b'typedef i64 Timestamp', 'ts_module').Timestamp == TType.I64
 
 
 def test_comments():

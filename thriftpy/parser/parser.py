@@ -484,15 +484,15 @@ not_reserved = ~(Reserved (' ' | '\t' | '\n'))
 
 
 BASE_TYPE_MAP = {
-    b'bool': TType.BOOL,
-    b'byte': TType.BYTE,
-    b'i8': TType.BYTE,
-    b'i16': TType.I16,
-    b'i32': TType.I32,
-    b'i64': TType.I64,
-    b'double': TType.DOUBLE,
-    b'string': TType.STRING,
-    b'binary': TType.BINARY
+    'bool': TType.BOOL,
+    'byte': TType.BYTE,
+    'i8': TType.BYTE,
+    'i16': TType.I16,
+    'i32': TType.I32,
+    'i64': TType.I64,
+    'double': TType.DOUBLE,
+    'string': TType.STRING,
+    'binary': TType.BINARY
 }
 
 
