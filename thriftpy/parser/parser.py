@@ -43,13 +43,13 @@ class ModuleLoader(object):
                 if os.path.exists(abs_path):
                     break
             else:
-                raise ParseError('could not find import {}'.format(path))
+                raise ParseError('could not find import {0}'.format(path))
         if abs_path in sofar:
             cycle = sofar[sofar.index(abs_path):] + (abs_path,)
             path_to_cycle = sofar[:sofar.index(abs_path)]
-            msg = 'circular import:\n{}'.format(' ->\n'.join(cycle))
+            msg = 'circular import:\n{0}'.format(' ->\n'.join(cycle))
             if path_to_cycle:
-                msg += "\nvia:\n{}".format(' ->\n'.join(path_to_cycle))
+                msg += "\nvia:\n{0}".format(' ->\n'.join(path_to_cycle))
             raise CircularInclude(msg)
         with open(abs_path, 'rb') as f:
             data = f.read()
@@ -129,7 +129,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         return MODULE_LOADER.load_data(data, module_name)
     else:
         raise ThriftParserError('ThriftPy does not support generating module '
-                                'with path in protocol \'{}\''.format(
+                                'with path in protocol \'{0}\''.format(
                                     url_scheme))
 
     if module_name is not None and not module_name.endswith('_thrift'):
@@ -332,7 +332,7 @@ def _lookup_symbol(module, identifier):
         return val
     except AttributeError:
         raise UnresovledReferenceError(
-            'could not resolve name {} in module {}'.format(identifier, module.__name__))
+            'could not resolve name {0} in module {1}'.format(identifier, module.__name__))
 
 
 class UnresovledReferenceError(ThriftParserError): pass
@@ -352,7 +352,7 @@ def _ref_val(module, name):
     'resolve a reference to a value, return the value'
     val = _lookup_symbol(module, name)
     if isinstance(val, type):
-        raise UnresovledReferenceError("{} in {} is a type, not a value".format(name, module))
+        raise UnresovledReferenceError("{0} in {1} is a type, not a value".format(name, module))
     return val
 
 
@@ -362,7 +362,7 @@ class NoSuchAttribute(ThriftParserError): pass
 def _attr_ttype(struct, attr):
     'return the ttype of attr in struct'
     if attr not in struct._tspec:
-        raise NoSuchAttribute('no attribute {} of struct {} in module {}'.format(
+        raise NoSuchAttribute('no attribute {0} of struct {1} in module {2}'.format(
             attr, struct.__name__, struct.__module__))
     return struct._tspec[attr][1]
 
