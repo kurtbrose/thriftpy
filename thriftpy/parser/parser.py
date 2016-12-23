@@ -11,6 +11,7 @@ import collections
 import os
 import sys
 import types
+import re
 import parsley
 from .exc import ThriftParserError, ThriftGrammerError
 from thriftpy._compat import urlopen, urlparse
@@ -448,7 +449,7 @@ Literal = str_val_a | str_val_b
 # 2 levels of string interpolation = \\\\ to get slash literal
 str_val_a = '"' <(('\\\\' '"') | (~'"' anything))*>:val '"' -> val
 str_val_b = "'" <(('\\\\' "'") | (~"'" anything))*>:val "'" -> val
-Identifier = not_reserved <(Letter | '_') (Letter | Digit | '.' | '_')*>
+Identifier = <(Letter | '_') (Letter | Digit | '.' | '_')*>:val ?(not is_reserved(val)) -> val
 identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
 annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # always optional
 annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
@@ -462,25 +463,29 @@ c_comment = '/*' <(~'*/' anything)*>:body '*/' -> body
 python_comment = '#' rest_of_line
 rest_of_line = <('\\\n' | (~'\n' anything))*>
 immutable = '(' brk 'python.immutable' brk '=' brk '""' brk ')'
-Reserved = ('__CLASS__' | '__DIR__' | '__FILE__' | '__FUNCTION__' | '__LINE__' | '__METHOD__' |
-            '__NAMESPACE__' | 'abstract' | 'alias' | 'and' | 'args' | 'as' | 'assert' | 'BEGIN' |
-            'begin' | 'binary' | 'bool' | 'break' | 'byte' | 'case' | 'catch' | 'class' | 'clone' |
-            'const' | 'continue' | 'declare' | 'def' | 'default' | 'del' | 'delete' | 'do' |
-            'double' | 'dynamic' | 'elif' | 'else' | 'elseif' | 'elsif' | 'END' | 'end' |
-            'enddeclare' | 'endfor' | 'endforeach' | 'endif' | 'endswitch' | 'endwhile' | 'ensure' |
-            'enum' | 'except' | 'exception' | 'exec' | 'extends' | 'finally' | 'float' | 'for' |
-            'foreach' | 'from' | 'function' | 'global' | 'goto' | 'i16' | 'i32' | 'i64' | 'if' |
-            'implements' | 'import' | 'in' | 'include' | 'inline' | 'instanceof' | 'interface' |
-            'is' | 'lambda' | 'list' | 'map' | 'module' | 'namespace' | 'native' | 'new' | 'next' |
-            'nil' | 'not' | 'oneway' | 'optional' | 'or' | 'pass' | 'print' | 'private' |
-            'protected' | 'public' | 'public' | 'raise' | 'redo' | 'register' | 'required' |
-            'rescue' | 'retry' | 'return' | 'self' | 'service' | 'set' | 'sizeof' | 'static' |
-            'string' | 'struct' | 'super' | 'switch' | 'synchronized' | 'then' | 'this' |
-            'throw' | 'throws' | 'transient' | 'try' | 'typedef' | 'undef' | 'union' | 'union' |
-            'unless' | 'unsigned' | 'until' | 'use' | 'var' | 'virtual' | 'void' | 'volatile' |
-            'when' | 'while' | 'with' | 'xor' | 'yield')
-not_reserved = ~(Reserved (' ' | '\t' | '\n'))
 '''
+
+RESERVED_TOKENS = (
+    '__CLASS__' , '__DIR__' , '__FILE__' , '__FUNCTION__' , '__LINE__' , '__METHOD__' ,
+    '__NAMESPACE__' , 'abstract' , 'alias' , 'and' , 'args' , 'as' , 'assert' , 'BEGIN' ,
+    'begin' , 'binary' , 'bool' , 'break' , 'byte' , 'case' , 'catch' , 'class' , 'clone' ,
+    'const' , 'continue' , 'declare' , 'def' , 'default' , 'del' , 'delete' , 'do' ,
+    'double' , 'dynamic' , 'elif' , 'else' , 'elseif' , 'elsif' , 'END' , 'end' ,
+    'enddeclare' , 'endfor' , 'endforeach' , 'endif' , 'endswitch' , 'endwhile' , 'ensure' ,
+    'enum' , 'except' , 'exception' , 'exec' , 'extends' , 'finally' , 'float' , 'for' ,
+    'foreach' , 'from' , 'function' , 'global' , 'goto' , 'i16' , 'i32' , 'i64' , 'if' ,
+    'implements' , 'import' , 'in' , 'include' , 'inline' , 'instanceof' , 'interface' ,
+    'is' , 'lambda' , 'list' , 'map' , 'module' , 'namespace' , 'native' , 'new' , 'next' ,
+    'nil' , 'not' , 'oneway' , 'optional' , 'or' , 'pass' , 'print' , 'private' ,
+    'protected' , 'public' , 'public' , 'raise' , 'redo' , 'register' , 'required' ,
+    'rescue' , 'retry' , 'return' , 'self' , 'service' , 'set' , 'sizeof' , 'static' ,
+    'string' , 'struct' , 'super' , 'switch' , 'synchronized' , 'then' , 'this' ,
+    'throw' , 'throws' , 'transient' , 'try' , 'typedef' , 'undef' , 'union' , 'union' ,
+    'unless' , 'unsigned' , 'until' , 'use' , 'var' , 'virtual' , 'void' , 'volatile' ,
+    'when' , 'while' , 'with' , 'xor' , 'yield')
+
+
+is_reserved = re.compile('^({0})$'.format('|'.join(RESERVED_TOKENS))).match
 
 
 BASE_TYPE_MAP = {
@@ -516,6 +521,7 @@ PARSER = parsley.makeGrammar(
         '_ref_type': _ref_type,
         '_ref_val': _ref_val,
         '_attr_ttype': _attr_ttype,
+        'is_reserved': is_reserved,
     }
 )
 
