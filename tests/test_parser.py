@@ -21,7 +21,10 @@ def test_grammar():
     PARSER('typedef map<string,i8> MapType').Typedef(types.ModuleType('<string>'))
     PARSER('namespace /* */ cpp.noexist /* */ ThriftTest').Namespace()
     PARSER('enum Foo { VAL1 = 8 VAL2 = 10 }').Enum(types.ModuleType('<string>'))
-    PARSER('service Foo { void foo() }').Service(types.ModuleType('<string>'))
+    foo_service = PARSER('service Foo /* the docstring */ { void foo() /* arg doc */}').Service(
+        types.ModuleType('<string>'))[2]
+    assert foo_service.__doc__ == 'the docstring'
+    assert foo_service.foo_args.__doc__ == 'arg doc'
     PARSER('union Foo { 1: string s }').Union(types.ModuleType('<string>'))
     PARSER('union Foo { 1: Foo first 2: string second }').Union(types.ModuleType('<string>'))
 

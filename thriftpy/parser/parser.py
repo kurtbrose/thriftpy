@@ -224,8 +224,8 @@ def _make_enum(name, kvs, module):
     return cls
 
 
-def _make_empty_struct(name, module, ttype=TType.STRUCT, base_cls=TPayload):
-    attrs = {'__module__': module.__name__, '_ttype': ttype}
+def _make_empty_struct(name, module, ttype=TType.STRUCT, base_cls=TPayload, docstring=''):
+    attrs = {'__module__': module.__name__, '_ttype': ttype, '__doc__': docstring}
     module.__dict__[name] = type(name, (base_cls, ), attrs)
     return module.__dict__[name]
 
@@ -252,16 +252,16 @@ def _fill_in_struct(cls, fields, _gen_init=True):
 
 
 def _make_struct(name, fields, module, ttype=TType.STRUCT, base_cls=TPayload,
-                 _gen_init=True):
-    cls = _make_empty_struct(name, module, ttype=ttype, base_cls=base_cls)
+                 _gen_init=True, docstring=''):
+    cls = _make_empty_struct(name, module, ttype=ttype, base_cls=base_cls, docstring=docstring)
     return _fill_in_struct(cls, fields or (), _gen_init=_gen_init)
 
 
-def _make_service(name, funcs, extends, module):
+def _make_service(name, funcs, extends, module, docstring):
     if extends is None:
         extends = object
 
-    attrs = {'__module__': module.__name__}
+    attrs = {'__module__': module.__name__, '__doc__': docstring}
     cls = type(name, (extends, ), attrs)
     thrift_services = []
 
@@ -269,7 +269,7 @@ def _make_service(name, funcs, extends, module):
         # args payload cls
         args_name = '%s_args' % func.name
         args_fields = func.fields
-        args_cls = _make_struct(args_name, args_fields, module)
+        args_cls = _make_struct(args_name, args_fields, module, docstring=func.docstring)
         setattr(cls, args_name, args_cls)
         # result payload cls
         result_name = '%s_result' % func.name
@@ -397,16 +397,16 @@ Exception :module = 'exception' brk Identifier:name brk fields(module):fields\
 DeclareStruct :module = Identifier:name !(DeclareStruct(name, module))
 fields :module = '{' (brk Field(module))*:fields brk '}' brk annotations brk -> fields
 Service :module =\
-    'service' brk Identifier:name brk ('extends' brk identifier_ref(module))?:extends brk\
+    'service' brk Identifier:name (brk 'extends' brk identifier_ref(module))?:extends docstring:docstring\
         '{' (brk Function(module))*:funcs brk annotations brk '}' brk annotations brk\
-    -> 'service', name, Service(name, funcs, extends, module), None
+    -> 'service', name, Service(name, funcs, extends, module, docstring), None
 Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk Identifier:name brk\
     ('=' brk ConstValue(module ttype))?:default brk annotations brk ListSeparator? -> Field(id, req, ttype, name, default)
 FieldID = int_val:val ':' -> val
 FieldReq = 'required' | 'optional' | !(b'default')
 # Functions
 Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name brk '(' (brk Field(module)*):fs ')'\
-     brk Throws(module)?:throws brk ListSeparator? -> Function(name, ft, fs, oneway, throws)
+     (brk Throws(module))?:throws (brk ListSeparator)? docstring:docstring -> Function(name, ft, fs, oneway, throws, docstring)
 FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
 # Types
@@ -457,7 +457,8 @@ ListSeparator = ',' | ';'
 Letter = letter  # parsley built-in
 Digit = digit  # parsley built-in
 Comment = cpp_comment | c_comment | python_comment
-brk = <(' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment | python_comment)*>
+brk = (' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment | python_comment)*
+docstring = brk:val -> '\\n'.join(val).strip()
 cpp_comment = '//' rest_of_line
 c_comment = '/*' <(~'*/' anything)*>:body '*/' -> body
 python_comment = '#' rest_of_line
@@ -511,7 +512,7 @@ PARSER = parsley.makeGrammar(
         '_fill_in_struct': _fill_in_struct,
         'Exception_': _make_exception,
         'Service': _make_service,
-        'Function': collections.namedtuple('Function', 'name ttype fields oneway throws'),
+        'Function': collections.namedtuple('Function', 'name ttype fields oneway throws docstring'),
         'Field': collections.namedtuple('Field', 'id req ttype name default'),
         'IdentifierRef': _lookup_symbol,
         'BaseTType': BASE_TYPE_MAP.get,
