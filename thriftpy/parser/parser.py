@@ -28,18 +28,19 @@ class ModuleLoader(object):
         self.include_dirs = include_dirs
 
     def load(self, path, module_name):
-        return self._load(path, True, module_name=module_name)
+        return self._load(path, True, os.getcwd(), module_name=module_name)
 
     def load_data(self, data, module_name, load_includes=False):
-        return self._load_data(data, module_name, load_includes=load_includes)
+        return self._load_data(
+            data, module_name, load_includes=load_includes, cur_path=os.getcwd())
 
-    def _load(self, path, load_includes, sofar=(), module_name=None):
+    def _load(self, path, load_includes, cur_path, sofar=(), module_name=None):
         if not path.endswith('.thrift'):
             raise ParseError()  # ...
         if os.path.isabs(path):
             abs_path = path
         else:
-            for base in self.include_dirs:
+            for base in [cur_path] + list(self.include_dirs):
                 abs_path = base + '/' + path
                 if os.path.exists(abs_path):
                     break
@@ -56,12 +57,13 @@ class ModuleLoader(object):
             data = f.read()
         if module_name is None:
             module_name = os.path.splitext(os.path.basename(abs_path))[0]  # remove '.thrift' from end
-        return self._load_data(data, module_name, load_includes, sofar + (abs_path,))
+        return self._load_data(
+            data, module_name, load_includes, os.path.basename(abs_path), sofar + (abs_path,))
 
     def _cant_load(self, path, *a, **kw):
         raise ThriftParserError('unexpected include statement while loading from data')
 
-    def _load_data(self, data, module_name, load_includes, sofar=()):
+    def _load_data(self, data, module_name, load_includes, cur_path, sofar=()):
         if module_name in self.modules:
             return self.modules[module_name]
         module = types.ModuleType(module_name)
@@ -71,7 +73,7 @@ class ModuleLoader(object):
                 document = PARSER(data).Document(module, self._cant_load)
             else:
                 document = PARSER(data).Document(
-                    module, lambda path: self._load(path, load_includes, sofar))
+                    module, lambda path: self._load(path, load_includes, cur_path, sofar))
         except parsley.ParseError as pe:
             raise ThriftParserError(pe)
         self.modules[module_name] = module
