@@ -356,7 +356,9 @@ def _ref_type(module, name):
         return val
     if isinstance(val, tuple):  # typedef
         return val
-    return val._ttype, val  # struct or enum
+    if val._ttype is TType.I32:  # enum
+        return val._ttype
+    return val._ttype, val  # struct
 
 
 def _ref_val(module, name):
