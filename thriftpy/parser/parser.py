@@ -18,9 +18,6 @@ from thriftpy._compat import urlopen, urlparse
 from ..thrift import gen_init, TType, TPayload, TException
 
 
-_DEFAULT = object()
-
-
 class ModuleLoader(object):
     '''
     Primary API for loading thrift files as modules.
@@ -32,23 +29,23 @@ class ModuleLoader(object):
 
     def load(self, path, module_name):
         return self._load(
-            path, True, os.path.dirname(os.path.abspath(path)), module_name=module_name)
+            path, True, path, module_name=module_name)
 
-    def load_data(self, data, module_name, load_includes=False, cur_path=_DEFAULT):
-        if cur_path is _DEFAULT:
-            cur_path = os.getcwd()
+    def load_data(self, data, module_name, load_includes=False, path=None):
         return self._load_data(
-            data, module_name, load_includes=load_includes, cur_path=cur_path)
+            data, module_name, load_includes=load_includes, abs_path=os.path.abspath(path))
 
-    def _load(self, path, load_includes, cur_path, sofar=(), module_name=None):
+    def _load(self, path, load_includes, parent_path, sofar=(), module_name=None):
         if not path.endswith('.thrift'):
             raise ParseError()  # ...
         if os.path.isabs(path):
             abs_path = path
         else:
-            for base in [cur_path] + list(self.include_dirs):
+            parent_dir = os.path.dirname(parent_path) or '.'  # prevent empty path from turning into '/'
+            for base in [parent_dir] + list(self.include_dirs):
                 abs_path = base + '/' + path
                 if os.path.exists(abs_path):
+                    abs_path = os.path.abspath(abs_path)
                     break
             else:
                 raise ParseError('could not find import {0}'.format(path))
@@ -64,27 +61,30 @@ class ModuleLoader(object):
         if module_name is None:
             module_name = os.path.splitext(os.path.basename(abs_path))[0]  # remove '.thrift' from end
         return self._load_data(
-            data, module_name, load_includes, os.path.dirname(abs_path), sofar + (abs_path,))
+            data, module_name, load_includes, abs_path, sofar + (abs_path,))
 
     def _cant_load(self, path, *a, **kw):
         raise ThriftParserError('unexpected include statement while loading from data')
 
-    def _load_data(self, data, module_name, load_includes, cur_path, sofar=()):
-        if module_name in self.modules:
-            return self.modules[module_name]
+    def _load_data(self, data, module_name, load_includes, abs_path, sofar=()):
+        cache_key = (module_name, abs_path)
+        if cache_key in self.modules:
+            return self.modules[cache_key]
         module = types.ModuleType(module_name)
         module.__thrift_meta__ = collections.defaultdict(list)
         try:
             if not load_includes:
                 document = PARSER(data).Document(module, self._cant_load)
             else:
+                # path = path of file to be loaded
+                # abs_path = path of parent file to enable relative imports
                 document = PARSER(data).Document(
-                    module, lambda path: self._load(path, load_includes, cur_path, sofar))
+                    module, lambda path: self._load(path, load_includes, abs_path, sofar))
         except parsley.ParseError as pe:
             raise ThriftParserError(
-                str(pe) + '\n in module {0} from {1}'.format(module_name, cur_path))
-        self.modules[module_name] = module
-        return self.modules[module_name]
+                str(pe) + '\n in module {0} from {1}'.format(module_name, abs_path))
+        self.modules[cache_key] = module
+        return self.modules[cache_key]
 
 
 class CircularInclude(ThriftParserError, ImportError): pass
@@ -137,7 +137,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
             data = fh.read()
     elif url_scheme in ('http', 'https'):
         data = urlopen(path).read()
-        return MODULE_LOADER.load_data(data, module_name)
+        return MODULE_LOADER.load_data(data, module_name, False)
     else:
         raise ThriftParserError('ThriftPy does not support generating module '
                                 'with path in protocol \'{0}\''.format(
@@ -151,7 +151,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         basename = os.path.basename(path)
         module_name = os.path.splitext(basename)[0]
 
-    module = MODULE_LOADER.load_data(data, module_name, True, os.path.dirname(path))
+    module = MODULE_LOADER.load_data(data, module_name, True, path)
     if not enable_cache:
         del MODULE_LOADER.modules[module_name]
     return module
@@ -183,9 +183,9 @@ def parse_fp(source, module_name, enable_cache=True):
                                 'a method named \'read\'')
 
     if enable_cache:
-        module = MODULE_LOADER.load_data(source.read(), module_name)
+        module = MODULE_LOADER.load_data(source.read(), module_name, False, '<string>/' + module_name)
     else:  # throw-away isolated ModuleLoader instance
-        return ModuleLoader().load_data(source.read(), module_name)
+        return ModuleLoader().load_data(source.read(), module_name, False, '<string>/' + module_name)
 
     module.__thrift_file__ = None
 

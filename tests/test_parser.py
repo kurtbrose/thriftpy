@@ -31,8 +31,8 @@ def test_grammar():
 
 def test_module_loader():
     ml = ModuleLoader()
-    assert ml.load_data('typedef i64 Timestamp', 'ts_module').Timestamp == TType.I64
-    assert ml.load_data(b'typedef i64 Timestamp', 'ts_module').Timestamp == TType.I64
+    assert ml.load_data('typedef i64 Timestamp', 'ts_module', path='<string>').Timestamp == TType.I64
+    assert ml.load_data(b'typedef i64 Timestamp', 'ts_module', path='<string>').Timestamp == TType.I64
 
 
 def test_comments():
