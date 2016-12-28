@@ -18,6 +18,9 @@ from thriftpy._compat import urlopen, urlparse
 from ..thrift import gen_init, TType, TPayload, TException
 
 
+_DEFAULT = object()
+
+
 class ModuleLoader(object):
     '''
     Primary API for loading thrift files as modules.
@@ -28,11 +31,14 @@ class ModuleLoader(object):
         self.include_dirs = include_dirs
 
     def load(self, path, module_name):
-        return self._load(path, True, os.getcwd(), module_name=module_name)
+        return self._load(
+            path, True, os.path.dirname(os.path.abspath(path)), module_name=module_name)
 
-    def load_data(self, data, module_name, load_includes=False):
+    def load_data(self, data, module_name, load_includes=False, cur_path=_DEFAULT):
+        if cur_path is _DEFAULT:
+            cur_path = os.getcwd()
         return self._load_data(
-            data, module_name, load_includes=load_includes, cur_path=os.getcwd())
+            data, module_name, load_includes=load_includes, cur_path=cur_path)
 
     def _load(self, path, load_includes, cur_path, sofar=(), module_name=None):
         if not path.endswith('.thrift'):
@@ -58,7 +64,7 @@ class ModuleLoader(object):
         if module_name is None:
             module_name = os.path.splitext(os.path.basename(abs_path))[0]  # remove '.thrift' from end
         return self._load_data(
-            data, module_name, load_includes, os.path.basename(abs_path), sofar + (abs_path,))
+            data, module_name, load_includes, os.path.dirname(abs_path), sofar + (abs_path,))
 
     def _cant_load(self, path, *a, **kw):
         raise ThriftParserError('unexpected include statement while loading from data')
@@ -75,7 +81,8 @@ class ModuleLoader(object):
                 document = PARSER(data).Document(
                     module, lambda path: self._load(path, load_includes, cur_path, sofar))
         except parsley.ParseError as pe:
-            raise ThriftParserError(pe)
+            raise ThriftParserError(
+                str(pe) + '\n in module {0} from {1}'.format(module_name, cur_path))
         self.modules[module_name] = module
         return self.modules[module_name]
 
@@ -122,7 +129,8 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
 
     url_scheme = urlparse(path).scheme
     if url_scheme == 'file':
-        with open(urlparse(path).netloc + urlparse(path).path) as fh:
+        path = urlparse(path).netloc + urlparse(path).path
+        with open(path) as fh:
             data = fh.read()
     elif url_scheme == '':
         with open(path) as fh:
@@ -143,7 +151,7 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
         basename = os.path.basename(path)
         module_name = os.path.splitext(basename)[0]
 
-    module = MODULE_LOADER.load_data(data, module_name, True)
+    module = MODULE_LOADER.load_data(data, module_name, True, os.path.dirname(path))
     if not enable_cache:
         del MODULE_LOADER.modules[module_name]
     return module
