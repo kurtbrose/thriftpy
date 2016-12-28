@@ -356,9 +356,7 @@ def _ref_type(module, name):
         return val
     if isinstance(val, tuple):  # typedef
         return val
-    if val._ttype is TType.I32:  # enum
-        return val._ttype
-    return val._ttype, val  # struct
+    return val._ttype, val  # struct or enum
 
 
 def _ref_val(module, name):
@@ -436,9 +434,10 @@ CppType = 'cpp_type' Literal -> None
 # Constant Values
 ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntConstant(ttype) | ConstList(module ttype)\
                             | ConstSet(module ttype) | ConstMap(module ttype) | ConstStruct(module ttype)\
-                            | ConstLiteral(ttype) | RefVal(module)
+                            | EnumConstant(ttype) | ConstLiteral(ttype) | RefVal(module)
 int_val = <('+' | '-')? Digit+>:val -> int(val)
 IntConstant :ttype = ?(ttype in (TType.BYTE, TType.I16, TType.I32, TType.I64)) int_val
+EnumConstant :ttype = check_ttype(TType.I32, ttype) int_val:val ?(val in ttype[1]._VALUES_TO_NAMES) -> val
 DoubleConstant :ttype = ?(ttype == TType.DOUBLE) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val\
                  -> float(val)
 BoolConstant :ttype = ?(ttype == TType.BOOL) \
@@ -455,13 +454,14 @@ ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
     '{' (brk Literal:name ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
         ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
     -> _cast_struct(ttype, dict(items))
-check_ttype :match :ttype = ?(ttype == match or isinstance(ttype, tuple) and ttype[0] == match)
+check_ttype :match :ttype = ?(isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
 Literal = str_val_a | str_val_b
 # 2 levels of string interpolation = \\\\ to get slash literal
 str_val_a = '"' <(('\\\\' '"') | (~'"' anything))*>:val '"' -> val
 str_val_b = "'" <(('\\\\' "'") | (~"'" anything))*>:val "'" -> val
-Identifier = <(Letter | '_') (Letter | Digit | '.' | '_')*>:val ?(not is_reserved(val)) -> val
+Identifier = <(Letter | '_') (Letter | Digit | '.' | '_')*>:val\
+             ?(not is_reserved(val))^(reserved keyword not valid in this context) -> val
 identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
 annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # always optional
 annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
