@@ -48,7 +48,7 @@ class ModuleLoader(object):
                     abs_path = os.path.abspath(abs_path)
                     break
             else:
-                raise ParseError('could not find import {0}'.format(path))
+                raise ParseError('could not find import {0} (from {1})'.format(path, parent_path))
         if abs_path in sofar:
             cycle = sofar[sofar.index(abs_path):] + (abs_path,)
             path_to_cycle = sofar[:sofar.index(abs_path)]
@@ -340,14 +340,24 @@ def _add_include(module, path, loadf):
 
 
 def _lookup_symbol(module, identifier):
-    try:
-        val = module
-        for rel_name in identifier.split('.'):
-            val = getattr(val, rel_name)
+    names = identifier.split('.')
+    def lookup_from(val, names):
+        for name in names:
+            val = getattr(val, name)
         return val
-    except AttributeError:
+    try:
+        return lookup_from(module, names)
+    except AttributeError:  # TODO: a cleaner way to handle multiple includes with same name?
+        mod_name, rest = names[0], names[1:]
+        for included in module.__thrift_meta__['includes']:
+            if mod_name == included.__name__:
+                try:
+                    return lookup_from(included, rest)
+                except AttributeError:
+                    pass
         raise UnresovledReferenceError(
-            'could not resolve name {0} in module {1}'.format(identifier, module.__name__))
+            'could not resolve name {0} in module {1} (from {2})'.format(
+                identifier, module.__name__, module.__thrift_file__))
 
 
 class UnresovledReferenceError(ThriftParserError): pass
@@ -460,7 +470,7 @@ ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
     -> dict(items)
 ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
     '{' (brk Literal:name brk ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
-        ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
+        ConstValue(module attr_ttype):val brk ListSeparator? brk -> name, val)*:items brk '}' brk\
     -> _cast_struct(ttype, dict(items))
 check_ttype :match :ttype = ?(isinstance(ttype, tuple) and ttype[0] == match)
 # Basic Definitions
@@ -476,7 +486,8 @@ annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # al
 annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
 ListSeparator = ',' | ';'
 Comment = cpp_comment | c_comment | python_comment
-brk = (' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment | python_comment)*
+brk = (white | c_comment | cpp_comment | python_comment)*
+white = <' ' | '\t' | '\n' | '\r' | ('\xe2\x80' anything:c ?(0x80 <= ord(c) <= 0x8F))>
 docstring = brk:val -> '\\n'.join(val).strip()
 cpp_comment = '//' rest_of_line
 c_comment = '/*' <(~'*/' anything)*>:body '*/' -> body
@@ -499,7 +510,8 @@ RESERVED_TOKENS = (
     'is' , 'lambda' , 'list' , 'map' , 'module' , 'namespace' , 'native' , 'new' , 'next' ,
     'nil' , 'not' , 'oneway' , 'optional' , 'or' , 'pass' , 'print' , 'private' ,
     'protected' , 'public' , 'public' , 'raise' , 'redo' , 'register' , 'required' ,
-    'rescue' , 'retry' , 'return' , 'self' , 'service' , 'set' , 'sizeof' , 'static' ,
+    'rescue' , #'retry' , 
+    'return' , 'self' , 'service' , 'set' , 'sizeof' , 'static' ,
     'string' , 'struct' , 'super' , 'switch' , 'synchronized' , 'then' , 'this' ,
     'throw' , 'throws' , 'transient' , 'try' , 'typedef' , 'undef' , 'union' , 'union' ,
     'unless' , 'unsigned' , 'until' , 'use' , 'var' , 'virtual' , 'void' , 'volatile' ,
