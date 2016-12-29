@@ -325,7 +325,10 @@ def _make_const(name, val, ttype):
 
 def _add_definition(module, type, name, val, ttype):
     module.__thrift_meta__[type + 's'].append(val)
-    module.__dict__[name] = val
+    setattr(module, name, val)
+    # TODO: this seems crazy
+    if hasattr(val, '_NAMES_TO_VALUES'):
+        module.__dict__.update(val._NAMES_TO_VALUES)
     return type, name, val, ttype
 
 
@@ -418,7 +421,7 @@ Field :module = brk FieldID:id brk FieldReq?:req brk FieldType(module):ttype brk
 FieldID = int_val:val ':' -> val
 FieldReq = 'required' | 'optional' | !(b'default')
 # Functions
-Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name brk '(' (brk Field(module)*):fs ')'\
+Function :module = 'oneway'?:oneway brk FunctionType(module):ft brk Identifier:name brk '(' (brk Field(module)*):fs brk ')'\
      (brk Throws(module))?:throws (brk ListSeparator)? docstring:docstring -> Function(name, ft, fs, oneway, throws, docstring)
 FunctionType :module = ('void' !(TType.VOID)) | FieldType(module)
 Throws :module = 'throws' brk '(' (brk Field(module))*:fs ')' -> fs
@@ -449,14 +452,14 @@ BoolConstant :ttype = ?(ttype == TType.BOOL) \
                       ((('true' | 'false'):val -> val == 'true') | (int_val:val -> bool(val)))
 ConstLiteral :ttype = ?(ttype in (TType.STRING, TType.BINARY)) Literal
 ConstList :module :ttype = check_ttype(TType.LIST ttype) array_vals(module ttype[1])
-ConstSet :module :ttype = check_ttype(TType.SET ttype) array_vals(module ttype[1]):vals -> set(vals)
+ConstSet :module :ttype = (check_ttype(TType.SET ttype) array_vals(module ttype[1]):vals -> set(vals)) | ('{}' -> set())
 array_vals :module :ttype = '[' (brk ConstValue(module ttype):val ListSeparator? -> val)*:vals ']' -> vals
 ConstMap :module :ttype = check_ttype(TType.MAP ttype)\
-    '{' (brk ConstValue(module ttype[1][0]):key ':' \
+    '{' (brk ConstValue(module ttype[1][0]):key brk ':' \
         brk ConstValue(module ttype[1][1]):val ListSeparator? -> key, val)*:items brk '}' brk\
     -> dict(items)
 ConstStruct :module :ttype = check_ttype(TType.STRUCT ttype) \
-    '{' (brk Literal:name ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
+    '{' (brk Literal:name brk ':' brk !(_attr_ttype(ttype[1], name)):attr_ttype \
         ConstValue(module attr_ttype):val ListSeparator? -> name, val)*:items brk '}' brk\
     -> _cast_struct(ttype, dict(items))
 check_ttype :match :ttype = ?(isinstance(ttype, tuple) and ttype[0] == match)
@@ -484,10 +487,11 @@ immutable = '(' brk 'python.immutable' brk '=' brk '""' brk ')'
 
 RESERVED_TOKENS = (
     '__CLASS__' , '__DIR__' , '__FILE__' , '__FUNCTION__' , '__LINE__' , '__METHOD__' ,
-    '__NAMESPACE__' , 'abstract' , 'alias' , 'and' , 'args' , 'as' , 'assert' , 'BEGIN' ,
+    '__NAMESPACE__' , 'abstract' , #'alias' , # TODO: so many reserved words...
+    'and' , 'args' , 'as' , 'assert' , 'BEGIN' ,
     'begin' , 'binary' , 'bool' , 'break' , 'byte' , 'case' , 'catch' , 'class' , 'clone' ,
     'const' , 'continue' , 'declare' , 'def' , 'default' , 'del' , 'delete' , 'do' ,
-    'double' , 'dynamic' , 'elif' , 'else' , 'elseif' , 'elsif' , 'END' , 'end' ,
+    'double' , 'dynamic' , 'elif' , 'else' , 'elseif' , 'elsif' , # 'END' , 'end' ,  # TODO: cleaner way to handle use of 'end'
     'enddeclare' , 'endfor' , 'endforeach' , 'endif' , 'endswitch' , 'endwhile' , 'ensure' ,
     'enum' , 'except' , 'exception' , 'exec' , 'extends' , 'finally' , 'float' , 'for' ,
     'foreach' , 'from' , 'function' , 'global' , 'goto' , 'i16' , 'i32' , 'i64' , 'if' ,
