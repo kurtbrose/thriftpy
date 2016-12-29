@@ -71,6 +71,7 @@ class ModuleLoader(object):
         if cache_key in self.modules:
             return self.modules[cache_key]
         module = types.ModuleType(module_name)
+        module.__thrift_file__ = abs_path
         module.__thrift_meta__ = collections.defaultdict(list)
         try:
             if not load_includes:
@@ -396,8 +397,10 @@ Const :module = 'const' brk FieldType(module):ttype brk Identifier:name brk '='\
 Typedef :module = 'typedef' brk DefinitionType(module):type brk annotations brk Identifier:alias brk annotations\
                    -> 'typedef', alias, type, None
 Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}' brk annotations brk\
-                -> 'enum', name, Enum(name, vals, module), None 
-enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk annotations ListSeparator? brk -> name, value
+                -> 'enum', name, Enum(name, vals, module), None
+# enum items are always referenced with the enum name as a prefix, so are never ambiguous
+# with language keywords; any token is okay not just valid identifiers
+enum_item = brk token:name brk ('=' brk int_val)?:value brk annotations ListSeparator? brk -> name, value
 Struct :module = 'struct' brk DeclareStruct(module):cls brk fields(module):fields brk immutable?\
                  -> 'struct', cls.__name__, _fill_in_struct(cls, fields), None
 Union :module = 'union' brk DeclareStruct(module):cls brk fields(module):fields\
@@ -435,10 +438,12 @@ CppType = 'cpp_type' Literal -> None
 ConstValue :module :ttype = DoubleConstant(ttype) | BoolConstant(ttype) | IntConstant(ttype) | ConstList(module ttype)\
                             | ConstSet(module ttype) | ConstMap(module ttype) | ConstStruct(module ttype)\
                             | EnumConstant(ttype) | ConstLiteral(ttype) | RefVal(module)
-int_val = <('+' | '-')? Digit+>:val -> int(val)
+int_val = <('+' | '-')? digit+>:val -> int(val)
 IntConstant :ttype = ?(ttype in (TType.BYTE, TType.I16, TType.I32, TType.I64)) int_val
-EnumConstant :ttype = check_ttype(TType.I32, ttype) int_val:val ?(val in ttype[1]._VALUES_TO_NAMES) -> val
-DoubleConstant :ttype = ?(ttype == TType.DOUBLE) <('+' | '-')? (Digit* '.' Digit+) | Digit+ (('E' | 'e') int_val)?>:val\
+EnumConstant :ttype = check_ttype(TType.I32 ttype)\
+                      (int_val:val ?(val in ttype[1]._VALUES_TO_NAMES) -> val) | \
+                      (token:val ?(type(ttype) is tuple and val in getattr(ttype[1], "_NAMES_TO_VALUES", ())) -> ttype[1]._NAMES_TO_VALUES[val])
+DoubleConstant :ttype = ?(ttype == TType.DOUBLE) <('+' | '-')? (digit* '.' digit+) | digit+ (('E' | 'e') int_val)?>:val\
                  -> float(val)
 BoolConstant :ttype = ?(ttype == TType.BOOL) \
                       ((('true' | 'false'):val -> val == 'true') | (int_val:val -> bool(val)))
@@ -459,15 +464,14 @@ check_ttype :match :ttype = ?(isinstance(ttype, tuple) and ttype[0] == match)
 Literal = str_val_a | str_val_b
 # 2 levels of string interpolation = \\\\ to get slash literal
 str_val_a = '"' <(('\\\\' '"') | (~'"' anything))*>:val '"' -> val
-str_val_b = "'" <(('\\\\' "'") | (~"'" anything))*>:val "'" -> val
-Identifier = <(Letter | '_') (Letter | Digit | '.' | '_')*>:val\
-             ?(not is_reserved(val))^(reserved keyword not valid in this context) -> val
+sq :c = ?("'" == c)
+str_val_b = sq <(('\\\\' sq) | (~sq anything))*>:val sq -> val
+token = <(letter | '_') (letter | digit | '.' | '_')*>
+Identifier = token:val ?(not is_reserved(val))^(reserved keyword not valid in this context) -> val
 identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
 annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # always optional
 annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
 ListSeparator = ',' | ';'
-Letter = letter  # parsley built-in
-Digit = digit  # parsley built-in
 Comment = cpp_comment | c_comment | python_comment
 brk = (' ' | '\t' | '\n' | '\r' | c_comment | cpp_comment | python_comment)*
 docstring = brk:val -> '\\n'.join(val).strip()

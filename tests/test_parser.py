@@ -9,24 +9,36 @@ from thriftpy.parser.exc import ThriftParserError, ThriftGrammerError
 
 
 def test_grammar():
+    import collections
     # just check that these valid things don't raise an exception
+    def m():
+        module = types.ModuleType('<string>')
+        module.__thrift_meta__ = collections.defaultdict(list)
+        return module
     assert PARSER('string_thing').Identifier() == 'string_thing'
     PARSER('Numberz.ONE').Identifier()
-    assert PARSER('list<binary>').ListType(types.ModuleType('<string>')) == (TType.LIST, TType.BINARY)
+    assert PARSER('list<binary>').ListType(m()) == (TType.LIST, TType.BINARY)
     PARSER('''{
       1: bool im_true,
       2: bool im_false,
     }''').fields(types.ModuleType('<string>'))
-    PARSER('typedef i64 UserId').Typedef(types.ModuleType('<string>'))
-    PARSER('typedef map<string,i8> MapType').Typedef(types.ModuleType('<string>'))
+    PARSER('typedef i64 UserId').Typedef(m())
+    PARSER('typedef map<string,i8> MapType').Typedef(m())
     PARSER('namespace /* */ cpp.noexist /* */ ThriftTest').Namespace()
-    PARSER('enum Foo { VAL1 = 8 VAL2 = 10 }').Enum(types.ModuleType('<string>'))
-    foo_service = PARSER('service Foo /* the docstring */ { void foo() /* arg doc */}').Service(
-        types.ModuleType('<string>'))[2]
+    PARSER('enum Foo { VAL1 = 8 VAL2 = 10 }').Enum(m())
+    PARSER('''
+        enum A { VAL = 2 }
+        struct B {
+            1: optional A one = 2
+            2: optional A two = VAL
+        }
+        const B b = {'one': VAL, 'two': 2}
+    ''').Document(m())
+    foo_service = PARSER('service Foo /* the docstring */ { void foo() /* arg doc */}').Service(m())[2]
     assert foo_service.__doc__ == 'the docstring'
     assert foo_service.foo_args.__doc__ == 'arg doc'
-    PARSER('union Foo { 1: string s }').Union(types.ModuleType('<string>'))
-    PARSER('union Foo { 1: Foo first 2: string second }').Union(types.ModuleType('<string>'))
+    PARSER('union Foo { 1: string s }').Union(m())
+    PARSER('union Foo { 1: Foo first 2: string second }').Union(m())
 
 
 def test_module_loader():
