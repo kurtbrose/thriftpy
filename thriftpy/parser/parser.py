@@ -115,10 +115,10 @@ def parse(path, module_name=None, include_dirs=None, include_dir=None,
                          cached, this is enabled by default. If `module_name`
                          is provided, use it as cache key, else use the `path`.
     """
-    if enable_cache and module_name in MODULE_LOADER.modules:
-        return MODULE_LOADER.modules[module_name]
+    cache_key = (module_name, os.path.abspath(path))
 
-    cache_key = module_name or os.path.normpath(path)
+    if enable_cache and cache_key in MODULE_LOADER.modules:
+        return MODULE_LOADER.modules[module_name]
 
     if include_dirs is not None:
         MODULE_LOADER.include_dirs = include_dirs
@@ -176,8 +176,10 @@ def parse_fp(source, module_name, enable_cache=True):
         raise ThriftParserError('ThriftPy can only generate module with '
                                 '\'_thrift\' suffix')
 
-    if enable_cache and module_name in MODULE_LOADER.modules:
-        return MODULE_LOADER.modules[module_name]
+    cache_key = (module_name, os.path.abspath(source))
+
+    if enable_cache and cache_key in MODULE_LOADER.modules:
+        return MODULE_LOADER.modules[cache_key]
 
     if not hasattr(source, 'read'):
         raise ThriftParserError('Except `source` to be a file-like object with'
@@ -413,7 +415,7 @@ Enum :module = 'enum' brk Identifier:name brk '{' enum_item*:vals '}' brk annota
                 -> 'enum', name, Enum(name, vals, module), None
 # enum items are always referenced with the enum name as a prefix, so are never ambiguous
 # with language keywords; any token is okay not just valid identifiers
-enum_item = brk token:name brk ('=' brk int_val)?:value brk annotations ListSeparator? brk -> name, value
+enum_item = brk Identifier:name brk ('=' brk int_val)?:value brk annotations ListSeparator? brk -> name, value
 Struct :module = 'struct' brk DeclareStruct(module):cls brk fields(module):fields brk immutable?\
                  -> 'struct', cls.__name__, _fill_in_struct(cls, fields), None
 Union :module = 'union' brk DeclareStruct(module):cls brk fields(module):fields\
@@ -455,7 +457,7 @@ int_val = <('+' | '-')? digit+>:val -> int(val)
 IntConstant :ttype = ?(ttype in (TType.BYTE, TType.I16, TType.I32, TType.I64)) int_val
 EnumConstant :ttype = check_ttype(TType.I32 ttype)\
                       (int_val:val ?(val in ttype[1]._VALUES_TO_NAMES) -> val) | \
-                      (token:val ?(type(ttype) is tuple and val in getattr(ttype[1], "_NAMES_TO_VALUES", ())) -> ttype[1]._NAMES_TO_VALUES[val])
+                      (Identifier:val ?(type(ttype) is tuple and val in getattr(ttype[1], "_NAMES_TO_VALUES", ())) -> ttype[1]._NAMES_TO_VALUES[val])
 DoubleConstant :ttype = ?(ttype == TType.DOUBLE) <('+' | '-')? (digit* '.' digit+) | digit+ (('E' | 'e') int_val)?>:val\
                  -> float(val)
 BoolConstant :ttype = ?(ttype == TType.BOOL) \
@@ -479,8 +481,8 @@ Literal = str_val_a | str_val_b
 str_val_a = '"' <(('\\\\' '"') | (~'"' anything))*>:val '"' -> val
 sq :c = ?("'" == c)
 str_val_b = sq <(('\\\\' sq) | (~sq anything))*>:val sq -> val
-token = <(letter | '_') (letter | digit | '.' | '_')*>
-Identifier = token:val ?(not is_reserved(val))^(reserved keyword not valid in this context) -> val
+Identifier = <(letter | '_') (letter | digit | '.' | '_')*>:val ~reserved(val) -> val
+#?(not is_reserved(self, val))^(reserved keyword not valid in this context) -> val
 identifier_ref :module = Identifier:val -> IdentifierRef(module, val)  # unresolved reference
 annotations = (brk '(' annotation*:name_vals')' brk -> name_vals)? | !(())  # always optional
 annotation = brk Identifier:name brk ('=' brk Literal)?:val brk ListSeparator? brk -> name, val
@@ -498,11 +500,11 @@ immutable = '(' brk 'python.immutable' brk '=' brk '""' brk ')'
 
 RESERVED_TOKENS = (
     '__CLASS__' , '__DIR__' , '__FILE__' , '__FUNCTION__' , '__LINE__' , '__METHOD__' ,
-    '__NAMESPACE__' , 'abstract' , #'alias' , # TODO: so many reserved words...
+    '__NAMESPACE__' , 'abstract' , 'alias' , # TODO: so many reserved words...
     'and' , 'args' , 'as' , 'assert' , 'BEGIN' ,
     'begin' , 'binary' , 'bool' , 'break' , 'byte' , 'case' , 'catch' , 'class' , 'clone' ,
     'const' , 'continue' , 'declare' , 'def' , 'default' , 'del' , 'delete' , 'do' ,
-    'double' , 'dynamic' , 'elif' , 'else' , 'elseif' , 'elsif' , # 'END' , 'end' ,  # TODO: cleaner way to handle use of 'end'
+    'double' , 'dynamic' , 'elif' , 'else' , 'elseif' , 'elsif' , 'END' , 'end' ,  # TODO: cleaner way to handle use of 'end'
     'enddeclare' , 'endfor' , 'endforeach' , 'endif' , 'endswitch' , 'endwhile' , 'ensure' ,
     'enum' , 'except' , 'exception' , 'exec' , 'extends' , 'finally' , 'float' , 'for' ,
     'foreach' , 'from' , 'function' , 'global' , 'goto' , 'i16' , 'i32' , 'i64' , 'if' ,
@@ -510,7 +512,7 @@ RESERVED_TOKENS = (
     'is' , 'lambda' , 'list' , 'map' , 'module' , 'namespace' , 'native' , 'new' , 'next' ,
     'nil' , 'not' , 'oneway' , 'optional' , 'or' , 'pass' , 'print' , 'private' ,
     'protected' , 'public' , 'public' , 'raise' , 'redo' , 'register' , 'required' ,
-    'rescue' , #'retry' , 
+    'rescue' , 'retry' , 
     'return' , 'self' , 'service' , 'set' , 'sizeof' , 'static' ,
     'string' , 'struct' , 'super' , 'switch' , 'synchronized' , 'then' , 'this' ,
     'throw' , 'throws' , 'transient' , 'try' , 'typedef' , 'undef' , 'union' , 'union' ,
@@ -518,7 +520,35 @@ RESERVED_TOKENS = (
     'when' , 'while' , 'with' , 'xor' , 'yield')
 
 
-is_reserved = re.compile('^({0})$'.format('|'.join(RESERVED_TOKENS))).match
+_is_reserved = re.compile('^({0})$'.format('|'.join(RESERVED_TOKENS))).match
+
+
+USED_TOKENS = (
+    'binary', 'bool', 'byte', 'const', 'double', 'enum', 'extends', 'float', 'i8', 'i16', 'i32', 'i64',
+    'include', 'map', 'namespace', 'oneway', 'optional', 'required', 'service', 'set',
+    'string', 'struct', 'throws', 'typedef', 'union'
+    )
+
+
+import warnings
+
+
+STRICT_RESERVED_IDENTIFIER = True
+
+
+class _GrammarBase(parsley.OMetaBase):
+    def rule_reserved(self, token):
+        match = _is_reserved(token)
+        if match:
+            if match in USED_TOKENS:
+                return True, self.input.head()[1]
+            pe = self.input.head()[1].withMessage(
+                'invalid use of reserved keyword {!r}'.format(token))
+            if STRICT_RESERVED_IDENTIFIER:
+                raise ValueError(str(pe))
+            else:
+                print str(pe)
+        return False, self.input.head()[1]
 
 
 BASE_TYPE_MAP = {
@@ -554,8 +584,8 @@ PARSER = parsley.makeGrammar(
         '_ref_type': _ref_type,
         '_ref_val': _ref_val,
         '_attr_ttype': _attr_ttype,
-        'is_reserved': is_reserved,
-    }
+        #'is_reserved': is_reserved,
+    }, extends=parsley.wrapGrammar(_GrammarBase)
 )
 
 
